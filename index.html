@@ -27,21 +27,16 @@
             pointer-events: none;
         }
         
-        /* Dynamic Crosshair Lines */
         .ch-line {
             position: absolute;
-            background-color: #00ff00; /* Classic Green */
+            background-color: #00ff00;
             box-shadow: 0 0 2px #000;
             transition: all 0.05s ease-out;
         }
         
-        /* Top */
         .ch-top { width: 2px; height: 10px; top: -14px; left: -1px; }
-        /* Bottom */
         .ch-bottom { width: 2px; height: 10px; top: 4px; left: -1px; }
-        /* Left */
         .ch-left { width: 10px; height: 2px; top: -1px; left: -14px; }
-        /* Right */
         .ch-right { width: 10px; height: 2px; top: -1px; left: 4px; }
 
         #hud {
@@ -57,12 +52,7 @@
             gap: 15px;
         }
 
-        #ammo-box {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-end;
-        }
-
+        #ammo-box { display: flex; flex-direction: column; align-items: flex-end; }
         #ammo-count { font-size: 42px; color: #ddd; }
         #ammo-reserve { font-size: 20px; color: #aaa; }
 
@@ -115,6 +105,20 @@
         }
         .debug-btn:hover { background: #444; color: #fff; }
 
+        /* Loading Status UI */
+        #status-log {
+            position: absolute;
+            top: 40px;
+            left: 10px;
+            color: #ffff00;
+            font-family: monospace;
+            background: rgba(0,0,0,0.5);
+            padding: 5px;
+            border-radius: 4px;
+            z-index: 100;
+            max-width: 300px;
+        }
+
         .key {
             background: #333;
             padding: 2px 8px;
@@ -127,6 +131,8 @@
     </style>
 </head>
 <body>
+
+    <div id="status-log">Initializing...</div>
 
     <!-- Debug UI: Helps you test the model in preview without hosting it -->
     <div id="debug-ui">
@@ -161,9 +167,16 @@
 
     <!-- Three.js from CDN -->
     <script type="module">
-        // Using the import map defined in <head>
         import * as THREE from 'three';
         import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+
+        // --- STATUS LOGGER ---
+        const logEl = document.getElementById('status-log');
+        function log(msg, color = '#ffff00') {
+            logEl.innerText = msg;
+            logEl.style.color = color;
+            console.log(msg);
+        }
 
         // --- CONSTANTS ---
         const MAX_SPEED = 6.0;
@@ -189,70 +202,35 @@
         
         // --- State ---
         let camera, scene, renderer;
-        
-        // Weapon Containers
-        let playerHand; // The parent group attached to camera
-        let rifleGroup, knifeGroup; // The actual weapon models
-        let customModelMesh = null; // Container for the imported glb
-        let muzzleFlashMesh, muzzleLight;
-
-        // Input State
+        let playerHand, rifleGroup, knifeGroup, customModelMesh, muzzleFlashMesh, muzzleLight;
         let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
-        let keySpace = false;
-        let isCrouched = false;
-        let canJump = false;
-        let isGrounded = false;
-        let isLocked = false;
-        
-        // Physics State
+        let keySpace = false, isCrouched = false, canJump = false, isGrounded = false, isLocked = false;
         let velocity = new THREE.Vector3(); 
         let prevTime = performance.now();
         let currentEyeHeight = STAND_HEIGHT;
-        
-        // Camera Angles
-        let camPitch = 0;
-        let camYaw = 0;
-        let recoilPitch = 0;
-        let recoilYaw = 0;
-        let recoilScreenShake = 0;
-
-        // Gun/Knife Logic
-        let activeWeapon = 'rifle'; // 'rifle' or 'knife'
-        let isFiring = false;
-        let lastFireTime = 0;
-        let currentAmmo = 30;
-        let reserveAmmo = 90;
-        let isReloading = false;
-        let currentSpread = 0;
-
-        // Animation State
+        let camPitch = 0, camYaw = 0;
+        let recoilPitch = 0, recoilYaw = 0, recoilScreenShake = 0;
+        let activeWeapon = 'rifle'; 
+        let isFiring = false, lastFireTime = 0;
+        let currentAmmo = 30, reserveAmmo = 90, isReloading = false, currentSpread = 0;
         let weaponBasePos = new THREE.Vector3(0.35, -0.4, -0.7); 
-        // Knife Position
         let knifeBasePos = new THREE.Vector3(0.25, -0.2, -0.45); 
         let swayPos = new THREE.Vector3(0,0,0);
         let bobTimer = 0;
-
-        // Inspect & Switch Animation
-        let isInspecting = false;
-        let inspectTimer = 0;
-        let drawTimer = 0; // 0 to 1
-        let isAttackingKnife = false;
-        let knifeAttackTimer = 0;
-
-        // Audio
+        let isInspecting = false, inspectTimer = 0, drawTimer = 0; 
+        let isAttackingKnife = false, knifeAttackTimer = 0;
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        let gunshotBuffer = null;
 
         init();
         animate();
 
         function init() {
-            // Load Audio
-            fetch('https://freesound.org/data/previews/163/163456_239630-lq.mp3') // Placeholder generic pop
-                .then(r => r.arrayBuffer())
-                .then(b => audioCtx.decodeAudioData(b))
-                .then(a => { gunshotBuffer = a; })
-                .catch(() => console.log("Audio load fallback"));
+            // Check for file:// protocol
+            if (window.location.protocol === 'file:') {
+                log("ERROR: Running from local file.\nBrowsers block 3D models here.\nUse a Local Server or GitHub Pages.", "#ff4444");
+            } else {
+                log("Ready. Use 'Manual Load' for local files.", "#00ff00");
+            }
 
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x87CEEB);
@@ -266,7 +244,6 @@
             renderer.shadowMap.enabled = true;
             document.body.appendChild(renderer.domElement);
 
-            // Lights
             const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
             scene.add(ambientLight);
             const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -288,20 +265,19 @@
 
             // AUTOMATIC LOADING OF MODEL (For GitHub Repo)
             // Expects 'ak-47.glb' to be in the same folder as this index.html
-            // Wrapped in try/catch to prevent crashing in preview if file missing
-            try {
+            // CRITICAL FIX: Only attempt auto-load if NOT in a Blob/Preview environment to prevent Invalid URL crash
+            const proto = window.location.protocol;
+            if (proto !== 'blob:' && proto !== 'data:') {
                 loadCustomGLB('ak-47.glb', true);
-            } catch(e) {
-                console.warn("Initial auto-load skipped (Preview environment)");
+            } else {
+                log("Preview Mode detected.\nAuto-load skipped to prevent errors.\nUse the button to load model.", "#aaaaff");
             }
 
-            // Event Listeners
+            // Inputs
             document.addEventListener('keydown', onKeyDown);
             document.addEventListener('keyup', onKeyUp);
             document.addEventListener('mousedown', (e) => { 
-                if(isLocked) {
-                    if (e.button === 0) startFire();
-                }
+                if(isLocked && e.button === 0) startFire();
             });
             document.addEventListener('mouseup', () => { isFiring = false; });
             document.addEventListener('mousemove', onMouseMove);
@@ -327,12 +303,12 @@
         }
 
         function loadCustomGLB(url, isAuto = false) {
+            if(!isAuto) log("Loading custom model...", "#ffff00");
             const loader = new GLTFLoader();
             
-            // Wrap loader.load in try-catch because XHR.open can throw synchronously on invalid URLs
             try {
                 loader.load(url, (gltf) => {
-                    console.log("ak-47.glb loaded successfully");
+                    log("Model Loaded Successfully!", "#00ff00");
                     
                     if (customModelMesh) {
                         // Remove fallback placeholder
@@ -342,26 +318,25 @@
                         
                         const model = gltf.scene;
                         
-                        // Auto-Scale Logic
+                        // Auto-Scale
                         const box = new THREE.Box3().setFromObject(model);
                         const size = new THREE.Vector3();
                         box.getSize(size);
-                        
                         const maxDim = Math.max(size.x, size.y, size.z);
-                        const targetSize = 0.85; 
                         
+                        // Target ~0.85 units long
                         if (maxDim > 0) {
-                            const scaleFactor = targetSize / maxDim;
+                            const scaleFactor = 0.85 / maxDim;
                             model.scale.setScalar(scaleFactor);
                         }
 
-                        // Re-center logic
+                        // Re-center
                         const box2 = new THREE.Box3().setFromObject(model);
                         const center = new THREE.Vector3();
                         box2.getCenter(center);
                         model.position.sub(center); 
                         
-                        // Rotation Adjustment
+                        // Rotation (Most guns need -90deg Y)
                         model.rotation.y = -Math.PI / 2;
 
                         model.traverse((n) => { 
@@ -373,15 +348,21 @@
 
                         customModelMesh.add(model);
                     }
-
-                }, undefined, (err) => {
-                    // This handles 404s and async errors
-                    if(!isAuto) console.error("Could not load model:", err);
-                    else console.warn("Auto-load failed (Normal if file is missing in preview):", err);
+                }, 
+                undefined, 
+                (err) => {
+                    console.error(err);
+                    if (window.location.protocol === 'file:') {
+                        log("BLOCKED: Browser cannot load local files.\nSolution: Upload to GitHub Pages.", "#ff4444");
+                    } else if (isAuto) {
+                        // Silent fail for auto-load in case file is missing
+                        console.warn("Auto-load failed (file missing or network error).");
+                    } else {
+                        log("Error loading model. See console.", "#ff4444");
+                    }
                 });
-            } catch (err) {
-                // This catches synchronous errors like SyntaxError in XHR
-                console.warn("Loader threw synchronous error (likely preview env):", err);
+            } catch(e) {
+                console.warn("Loader synchronous error:", e);
             }
         }
 
@@ -423,8 +404,6 @@
             createCrate(8, 5, 2);
         }
 
-        // --- MODEL CREATION ---
-        
         function createPlayerModel() {
             playerHand = new THREE.Group();
             camera.add(playerHand);
@@ -436,7 +415,6 @@
             playerHand.add(rifleGroup);
             playerHand.add(knifeGroup);
 
-            // Initial State
             switchWeapon('rifle');
         }
 
@@ -446,15 +424,14 @@
 
             // -- CUSTOM MODEL CONTAINER --
             customModelMesh = new THREE.Group();
-            // Placeholder Box (Visible while model loads)
+            // Placeholder: Grey box
             const fallbackGeo = new THREE.BoxGeometry(0.08, 0.2, 0.6);
-            const fallbackMat = new THREE.MeshStandardMaterial({color: 0x222222, wireframe: true});
+            const fallbackMat = new THREE.MeshStandardMaterial({color: 0x555555});
             const fallback = new THREE.Mesh(fallbackGeo, fallbackMat);
             customModelMesh.add(fallback); 
             group.add(customModelMesh);
 
-            // Hands (Rifle Grip) - KEPT so you have hands
-            // R Hand (Trigger)
+            // Hands
             const rHand = new THREE.Group();
             rHand.position.set(0, -0.12, 0.25);
             rHand.rotation.x = -0.2;
@@ -472,7 +449,6 @@
             group.add(rHand);
             group.add(rArm);
 
-            // L Hand (Foregrip)
             const lHand = new THREE.Group();
             lHand.position.set(0, -0.06, -0.35);
             const lPalm = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.025, 0.07), skinMat);
@@ -495,7 +471,6 @@
             group.add(lHand);
             group.add(lArm);
 
-            // Muzzle Flash
             const flashGeo = new THREE.PlaneGeometry(0.3, 0.3);
             const flashMat = new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0.8, side: THREE.DoubleSide, blending: THREE.AdditiveBlending });
             muzzleFlashMesh = new THREE.Mesh(flashGeo, flashMat);
@@ -512,40 +487,32 @@
 
         function createM9Bayonet() {
             const group = new THREE.Group();
-            // Materials - POLISHED WHITE BLADE
             const bladeMat = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.8, roughness: 0.1 }); 
-            const handleMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.8 }); // Darker, simpler handle
+            const handleMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.8 });
             const guardMat = new THREE.MeshStandardMaterial({ color: 0x444444, metalness: 0.6, roughness: 0.4 });
             const skinMat = new THREE.MeshStandardMaterial({ color: 0xffdbac, roughness: 0.6 });
 
-            // Orientation wrapper to point forward naturally
             const weaponWrapper = new THREE.Group();
             weaponWrapper.rotation.set(0, 0, -0.2); 
             
-            // 1. Handle (Simpler, slightly curved)
             const handleGeo = new THREE.CylinderGeometry(0.022, 0.025, 0.13, 12);
             const handle = new THREE.Mesh(handleGeo, handleMat);
             handle.position.y = 0.01;
-            handle.scale.set(1, 1, 0.8); // Elliptical cross-section
+            handle.scale.set(1, 1, 0.8);
             weaponWrapper.add(handle);
 
-            // pommel
             const pommel = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.022, 0.02, 12), guardMat);
             pommel.position.y = -0.065;
             weaponWrapper.add(pommel);
 
-
-            // 2. Guard (Simpler crossguard)
             const guard = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.06, 0.02), guardMat);
             guard.position.y = 0.08;
             weaponWrapper.add(guard);
             
-            // 3. Blade (Simpler, single piece)
             const bladeGeo = new THREE.BoxGeometry(0.006, 0.25, 0.035);
             const blade = new THREE.Mesh(bladeGeo, bladeMat);
-            blade.position.y = 0.215; // Extend from handle along Y
+            blade.position.y = 0.215; 
             
-            // Taper for sharpness
             const positions = blade.geometry.attributes.position.array;
             for (let i = 0; i < positions.length; i += 3) {
                 const y = positions[i + 1];
@@ -556,10 +523,9 @@
             weaponWrapper.add(blade);
             group.add(weaponWrapper);
 
-            // --- KNIFE HANDS (One hand - Right hand) ---
             const handGroup = new THREE.Group();
             const palm = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.1, 0.05), skinMat);
-            palm.position.set(0.03, 0, 0); // Offset to hold the handle center
+            palm.position.set(0.03, 0, 0); 
             handGroup.add(palm);
 
             const f1 = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.09, 8), skinMat);
@@ -595,57 +561,45 @@
             return group;
         }
 
-        // --- GAMEPLAY LOGIC ---
-
         function switchWeapon(type) {
             if (activeWeapon === type || isReloading || isAttackingKnife) return;
             
-            // Reset States
             isInspecting = false;
             inspectTimer = 0;
             isFiring = false;
             
             activeWeapon = type;
-            drawTimer = 0; // Start draw animation
+            drawTimer = 0; 
 
             if (type === 'rifle') {
                 rifleGroup.visible = true;
                 knifeGroup.visible = false;
                 document.getElementById('weapon-icon').innerText = "AK-47";
                 document.getElementById('ammo-box').style.opacity = "1";
-                // Crosshair standard
                 document.querySelectorAll('.ch-line').forEach(el => el.style.backgroundColor = '#00ff00');
             } else {
                 rifleGroup.visible = false;
                 knifeGroup.visible = true;
                 document.getElementById('weapon-icon').innerText = "M9 BAYONET";
-                document.getElementById('ammo-box').style.opacity = "0.3"; // Dim ammo
-                // Crosshair dim
+                document.getElementById('ammo-box').style.opacity = "0.3"; 
                 document.querySelectorAll('.ch-line').forEach(el => el.style.backgroundColor = 'rgba(255, 255, 255, 0.3)');
             }
         }
 
         function startFire() {
-            // Cancel inspect on fire
             if (isInspecting) isInspecting = false;
-
-            if (activeWeapon === 'rifle') {
-                isFiring = true;
-            } else if (activeWeapon === 'knife') {
-                stab();
-            }
+            if (activeWeapon === 'rifle') isFiring = true;
+            else if (activeWeapon === 'knife') stab();
         }
 
         function stab() {
             if (isAttackingKnife || drawTimer < 0.8) return;
-            
             isAttackingKnife = true;
             knifeAttackTimer = 0;
 
             const raycaster = new THREE.Raycaster();
             raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
             raycaster.far = 2.5; 
-            
             const intersects = raycaster.intersectObjects(scene.children);
             playSound('swish');
 
@@ -662,7 +616,6 @@
 
         function playSound(type) {
             if (audioCtx.state === 'suspended') audioCtx.resume();
-            
             const t = audioCtx.currentTime;
             
             if (type === 'shoot') {
@@ -670,8 +623,6 @@
                 const gain = audioCtx.createGain();
                 osc.connect(gain);
                 gain.connect(audioCtx.destination);
-
-                // Procedural Gunshot
                 osc.type = 'sawtooth';
                 osc.frequency.setValueAtTime(100, t);
                 osc.frequency.exponentialRampToValueAtTime(20, t + 0.1);
@@ -680,7 +631,6 @@
                 osc.start(t);
                 osc.stop(t + 0.2);
                 
-                // Noise layer
                 const noiseSize = audioCtx.sampleRate * 0.2;
                 const buffer = audioCtx.createBuffer(1, noiseSize, audioCtx.sampleRate);
                 const data = buffer.getChannelData(0);
@@ -695,36 +645,25 @@
                 noiseSrc.start(t);
 
             } else if (type === 'swish') {
-                // Knife Slash - White Noise + Filter Sweep
-                const bufferSize = audioCtx.sampleRate * 0.3; // Short buffer
+                const bufferSize = audioCtx.sampleRate * 0.3;
                 const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
                 const data = buffer.getChannelData(0);
-                for (let i = 0; i < bufferSize; i++) {
-                    data[i] = Math.random() * 2 - 1;
-                }
-
+                for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
                 const noise = audioCtx.createBufferSource();
                 noise.buffer = buffer;
-
                 const filter = audioCtx.createBiquadFilter();
                 filter.type = 'bandpass';
-                filter.Q.value = 0.5; // Wider band for "air" sound
-
-                // Sweep frequency to simulate speed (Low -> High -> Low)
+                filter.Q.value = 0.5;
                 filter.frequency.setValueAtTime(600, t);
-                filter.frequency.linearRampToValueAtTime(3000, t + 0.1); // Peak speed
+                filter.frequency.linearRampToValueAtTime(3000, t + 0.1);
                 filter.frequency.linearRampToValueAtTime(600, t + 0.25); 
-
                 const gain = audioCtx.createGain();
-                // Sharp Envelope
                 gain.gain.setValueAtTime(0.01, t);
-                gain.gain.linearRampToValueAtTime(0.6, t + 0.08); // Attack
-                gain.gain.exponentialRampToValueAtTime(0.01, t + 0.25); // Release
-
+                gain.gain.linearRampToValueAtTime(0.6, t + 0.08); 
+                gain.gain.exponentialRampToValueAtTime(0.01, t + 0.25); 
                 noise.connect(filter);
                 filter.connect(gain);
                 gain.connect(audioCtx.destination);
-
                 noise.start(t);
                 noise.stop(t + 0.3);
 
@@ -733,8 +672,6 @@
                 const gain = audioCtx.createGain();
                 osc.connect(gain);
                 gain.connect(audioCtx.destination);
-
-                // Knife hit wall
                 osc.type = 'square';
                 osc.frequency.setValueAtTime(150, t);
                 osc.frequency.exponentialRampToValueAtTime(40, t + 0.05);
@@ -778,16 +715,12 @@
 
         function onMouseMove(event) {
             if (!isLocked) return;
-            // Prevent snapping on large movements (e.g. pointer lock init)
             if (Math.abs(event.movementX) > 100 || Math.abs(event.movementY) > 100) return;
-
             camYaw -= event.movementX * SENSITIVITY;
             camPitch -= event.movementY * SENSITIVITY;
-            
             const limit = 1.51; 
             if (camPitch > limit) camPitch = limit;
             if (camPitch < -limit) camPitch = -limit;
-            
             const maxSway = 0.06;
             const swayX = Math.max(-maxSway, Math.min(maxSway, -event.movementX * 0.0006));
             const swayY = Math.max(-maxSway, Math.min(maxSway, -event.movementY * 0.0006));
@@ -796,22 +729,15 @@
         }
 
         function fireRifle() {
-            if (isReloading || isInspecting) return; // Inspect cancels or prevents fire usually, here we prevent
-            if (currentAmmo <= 0) {
-                reload();
-                isFiring = false; 
-                return;
-            }
+            if (isReloading || isInspecting) return; 
+            if (currentAmmo <= 0) { reload(); isFiring = false; return; }
 
             currentAmmo--;
             updateHUD();
             playSound('shoot');
 
-            // Adjusted Recoil (Lower than 0.14 base to make it 'easier')
             let kickUp = 0.11 + Math.random() * 0.06; 
             let kickSide = (Math.random() - 0.5) * 0.1;
-            
-            // Significant Recoil Reduction when Crouched (0.3 instead of 0.6)
             const recoilMod = isCrouched ? 0.3 : 1.0;
             kickUp *= recoilMod;
             kickSide *= recoilMod;
@@ -828,41 +754,22 @@
             const scale = 0.8 + Math.random() * 0.5;
             muzzleFlashMesh.scale.set(scale, scale, 1);
             muzzleLight.intensity = 4.0;
-            
             setTimeout(() => { muzzleFlashMesh.visible = false; }, 40);
 
-            // Hit Scan
             const horizSpeed = new THREE.Vector2(velocity.x, velocity.z).length();
-            
-            // --- UPDATED SPREAD LOGIC ---
-            // Base Standing Spread (Less accurate now, previously 0.002)
             let spreadFactor = 0.008; 
-            
-            // Movement Penalty
             if (horizSpeed > 0.1) spreadFactor += (horizSpeed / MAX_SPEED) * 0.15;
-            
-            // Air Penalty
             if (!isGrounded) spreadFactor += 0.1;
-
-            // Crouch Modifiers
             if (isCrouched) {
-                if (horizSpeed < 0.1) {
-                    // Crouching AND Stationary: 96.7% Accurate (Extremely low spread)
-                    spreadFactor = 0.0005; 
-                } else {
-                    // Crouching AND Moving: Better than standing moving
-                    spreadFactor *= 0.4;
-                }
+                if (horizSpeed < 0.1) spreadFactor = 0.0005; 
+                else spreadFactor *= 0.4;
             }
-
             currentSpread = spreadFactor * 50.0; 
 
             const spreadX = (Math.random() - 0.5) * spreadFactor;
             const spreadY = (Math.random() - 0.5) * spreadFactor;
-
             const raycaster = new THREE.Raycaster();
             raycaster.setFromCamera(new THREE.Vector2(spreadX, spreadY), camera);
-
             const intersects = raycaster.intersectObjects(scene.children);
             if (intersects.length > 0) {
                 const hit = intersects[0];
@@ -880,7 +787,6 @@
             );
             decal.position.copy(position).add(normal.clone().multiplyScalar(0.01));
             decal.lookAt(position.clone().add(normal));
-            // Knife slash rotation
             if(isKnife) decal.rotation.z = Math.random() * Math.PI; 
             scene.add(decal);
             setTimeout(() => { scene.remove(decal); }, 10000);
@@ -898,10 +804,8 @@
             const animateReload = () => {
                 const now = performance.now();
                 const progress = (now - startTime) / RELOAD_TIME;
-                
                 if (progress < 0.2) rifleGroup.rotation.x = THREE.MathUtils.lerp(initialRot, downRot, progress * 5);
                 else if (progress > 0.8) rifleGroup.rotation.x = THREE.MathUtils.lerp(downRot, initialRot, (progress - 0.8) * 5);
-
                 if (progress < 1) requestAnimationFrame(animateReload);
                 else {
                     rifleGroup.rotation.x = initialRot;
@@ -923,7 +827,6 @@
 
         function updateCrosshair(vel) {
             if (activeWeapon === 'knife') {
-                // Knife crosshair is just a dot or very small
                 const top = document.getElementById('ch-top');
                 const bot = document.getElementById('ch-bottom');
                 const left = document.getElementById('ch-left');
@@ -932,19 +835,16 @@
                 left.style.left = `-8px`; right.style.left = `2px`;
                 return;
             }
-
             const speed = new THREE.Vector2(vel.x, vel.z).length();
             let gap = 5;
             if (speed > 0.1) gap += (speed / MAX_SPEED) * 50; 
             if (!isGrounded) gap += 30; 
             gap += currentSpread; 
             gap = Math.min(gap, 100);
-
             const top = document.getElementById('ch-top');
             const bot = document.getElementById('ch-bottom');
             const left = document.getElementById('ch-left');
             const right = document.getElementById('ch-right');
-
             top.style.top = `-${14 + gap}px`;
             bot.style.top = `${4 + gap}px`;
             left.style.left = `-${14 + gap}px`;
@@ -957,7 +857,6 @@
             renderer.setSize(window.innerWidth, window.innerHeight);
         }
 
-        // --- PHYSICS & ANIMATION LOOP ---
         function applyFriction(delta) {
             const speed = new THREE.Vector2(velocity.x, velocity.z).length();
             if (speed < 0.1) return;
@@ -984,7 +883,6 @@
 
         function animate() {
             requestAnimationFrame(animate);
-
             const time = performance.now();
             const delta = Math.min((time - prevTime) / 1000, 0.1);
             prevTime = time;
@@ -994,10 +892,8 @@
                 return;
             }
 
-            // --- Movement ---
             const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0,1,0), camYaw);
             const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0,1,0), camYaw);
-
             let wishDir = new THREE.Vector3();
             if (moveForward) wishDir.add(forward);
             if (moveBackward) wishDir.sub(forward);
@@ -1005,7 +901,6 @@
             if (moveLeft) wishDir.sub(right);
             wishDir.normalize();
 
-            // Crouch Transition
             let targetHeight = isCrouched ? CROUCH_HEIGHT : STAND_HEIGHT;
             currentEyeHeight = THREE.MathUtils.lerp(currentEyeHeight, targetHeight, delta * 15);
 
@@ -1016,14 +911,12 @@
 
             if (isGrounded) {
                 applyFriction(delta);
-                // Dynamic speed based on weapon and crouch state
                 let speedLimit;
                 if (activeWeapon === 'knife') {
                     speedLimit = isCrouched ? CROUCH_SPEED_KNIFE : MAX_SPEED_KNIFE;
                 } else {
                     speedLimit = isCrouched ? CROUCH_SPEED : MAX_SPEED;
                 }
-                
                 accelerate(wishDir, speedLimit, ACCEL, delta);
             } else {
                 accelerate(wishDir, MAX_AIR_SPEED, AIR_ACCEL, delta);
@@ -1032,7 +925,6 @@
             velocity.y -= GRAVITY * delta;
             camera.position.add(velocity.clone().multiplyScalar(delta));
 
-            // Ground Check
             if (camera.position.y < currentEyeHeight) {
                 camera.position.y = currentEyeHeight;
                 if (velocity.y < 0) {
@@ -1043,13 +935,8 @@
             } else {
                 isGrounded = false;
             }
+            if (isGrounded) camera.position.y = currentEyeHeight;
 
-            // Stick to ground while standing up if already grounded
-            if (isGrounded) {
-                camera.position.y = currentEyeHeight;
-            }
-
-            // --- Camera Recoil ---
             const decay = 8.0;
             const factor = Math.exp(-decay * delta);
             recoilPitch *= factor;
@@ -1066,17 +953,12 @@
             camera.rotation.x = finalPitch;
             camera.rotation.y = camYaw + recoilYaw;
 
-            // --- Weapon Animations ---
-
-            // 1. Draw Animation (Smoothly bring weapon up)
             if (drawTimer < 1.0) {
-                drawTimer += delta * 3.0; // Speed of draw
+                drawTimer += delta * 3.0; 
                 if (drawTimer > 1.0) drawTimer = 1.0;
             }
-            // Draw curve: start lower, end at base
             const drawOffset = (1.0 - Math.pow(drawTimer, 0.5)) * -0.5;
 
-            // 2. Sway & Bob
             swayPos.x = THREE.MathUtils.lerp(swayPos.x, 0, delta * 10);
             swayPos.y = THREE.MathUtils.lerp(swayPos.y, 0, delta * 10);
 
@@ -1090,7 +972,6 @@
                 bobTimer = 0;
             }
 
-            // 3. Logic per weapon
             if (activeWeapon === 'rifle') {
                 if (!isReloading) {
                     rifleGroup.position.set(
@@ -1098,8 +979,6 @@
                         weaponBasePos.y + swayPos.y + bobY + drawOffset,
                         weaponBasePos.z
                     );
-                    
-                    // Simple Rifle Inspect
                     if (isInspecting) {
                         inspectTimer += delta;
                         rifleGroup.rotation.y = THREE.MathUtils.lerp(0, 0.5, Math.sin(inspectTimer * 2));
@@ -1110,8 +989,6 @@
                         rifleGroup.rotation.z = THREE.MathUtils.lerp(rifleGroup.rotation.z, 0, delta * 10);
                     }
                 }
-                
-                // Muzzle Light Fade
                 if (muzzleLight.intensity > 0) muzzleLight.intensity -= delta * 30;
                 if (isFiring && time - lastFireTime > FIRE_RATE) {
                     fireRifle();
@@ -1120,62 +997,46 @@
                 currentSpread = THREE.MathUtils.lerp(currentSpread, 0, delta * 5);
             
             } else if (activeWeapon === 'knife') {
-                
                 let targetPos = knifeBasePos.clone();
                 let targetRot = new THREE.Euler(0, 0, 0);
 
-                // Attack Animation
                 if (isAttackingKnife) {
                     knifeAttackTimer += delta;
-                    // Slice Motion (Diagonal Swipe)
                     const slashDuration = 0.35;
                     const progress = knifeAttackTimer / slashDuration;
                     
                     if (progress < 0.2) {
-                        // Wind up: Pull back right/up
                          targetPos.x += 0.15;
                          targetPos.y += 0.15;
                          targetRot.z = -0.5; 
                          targetRot.y = -0.3;
                     } else if (progress < 0.6) {
-                        // Slash: Swipe across to the left
-                        targetPos.x -= 0.4; // Big swipe left
+                        targetPos.x -= 0.4; 
                         targetPos.y -= 0.1;
-                        targetPos.z -= 0.3; // Reach forward
+                        targetPos.z -= 0.3; 
                         
-                        targetRot.z = 1.2; // Wrist flick
+                        targetRot.z = 1.2; 
                         targetRot.x = -0.4;
                         targetRot.y = 0.8;
                     }
-                    
                     if (knifeAttackTimer > slashDuration) isAttackingKnife = false;
                 } 
-                // Inspect Animation (CS2 Style: Roll then Look)
                 else if (isInspecting) {
                     inspectTimer += delta;
-                    
-                    // Phase 1: The Roll (0s - 0.4s) - Flip over hand
                     if (inspectTimer < 0.4) {
                         const t = inspectTimer / 0.4;
-                        // Spin along axis
                         targetRot.z = Math.PI * 2 * t; 
-                        targetRot.x = -Math.PI * 0.3 * Math.sin(t * Math.PI); // Dip down slightly
-                    } 
-                    // Phase 2: The Hold / Look (0.4s+)
-                    else {
+                        targetRot.x = -Math.PI * 0.3 * Math.sin(t * Math.PI); 
+                    } else {
                         const t = inspectTimer - 0.4;
-                        // Center screen
                         targetPos.x = 0.0; 
                         targetPos.y = -0.25;
-                        
-                        // Show flat side
-                        targetRot.z = 0.6; // Tilt sideways
-                        targetRot.y = 0.4 + Math.cos(t * 1.5) * 0.15; // Slowly pan back and forth
-                        targetRot.x = 0.2 + Math.sin(t * 2) * 0.05; // Gentle bob
+                        targetRot.z = 0.6; 
+                        targetRot.y = 0.4 + Math.cos(t * 1.5) * 0.15; 
+                        targetRot.x = 0.2 + Math.sin(t * 2) * 0.05; 
                     }
                 }
 
-                // Apply transforms with smoothing
                 const smooth = delta * 15;
                 knifeGroup.position.set(
                     THREE.MathUtils.lerp(knifeGroup.position.x, targetPos.x + swayPos.x + bobX, smooth),
