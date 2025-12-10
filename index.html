@@ -98,6 +98,52 @@
             z-index: 10;
         }
 
+        /* Settings Modal */
+        #settings-modal {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(10, 10, 10, 0.95);
+            padding: 30px;
+            border-radius: 8px;
+            border: 1px solid #666;
+            color: white;
+            z-index: 20;
+            text-align: center;
+            min-width: 300px;
+            box-shadow: 0 0 30px rgba(0,0,0,0.8);
+        }
+
+        .menu-btn {
+            background: #444; 
+            color: white; 
+            border: 1px solid #666; 
+            padding: 8px 20px;
+            font-size: 16px; 
+            cursor: pointer; 
+            margin-top: 15px;
+            border-radius: 4px;
+            transition: background 0.2s;
+        }
+        .menu-btn:hover { background: #666; }
+
+        .setting-row { 
+            margin: 20px 0; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+        }
+        .setting-row label {
+            font-size: 16px;
+            color: #ccc;
+        }
+        input[type=range] { 
+            width: 150px; 
+            accent-color: #00ff00;
+        }
+
         /* Flashbang Overlay */
         #flash-overlay {
             position: fixed;
@@ -144,13 +190,37 @@
         </div>
     </div>
 
+    <!-- Main Menu / Instructions -->
     <div id="instructions">
         <h1 style="margin-top:0;">CS:GO Gun Sim</h1>
-        <p>Click to Start</p>
+        <p>Click Area to Start</p>
         <p><span class="key">WASD</span> Move &nbsp; <span class="key">SPACE</span> Jump (Hold to Bhop)</p>
         <p><span class="key">C</span> Crouch &nbsp; <span class="key">R</span> Reload</p>
         <p><span class="key">1</span> Rifle &nbsp; <span class="key">3</span> Knife &nbsp; <span class="key">4</span> Flash</p>
         <p><span class="key">F (Hold)</span> Inspect &nbsp; <span class="key">L-Click</span> Shoot</p>
+        <button id="btn-settings" class="menu-btn">Settings</button>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal">
+        <h2 style="margin-top:0; color: #fff; border-bottom: 1px solid #444; padding-bottom: 10px;">Audio Settings</h2>
+        
+        <div class="setting-row">
+            <label>Master Volume</label>
+            <input type="range" id="vol-master" min="0" max="1" step="0.05" value="1">
+        </div>
+        
+        <div class="setting-row">
+            <label>Shoot Volume</label>
+            <input type="range" id="vol-shoot" min="0" max="1" step="0.05" value="1">
+        </div>
+        
+        <div class="setting-row">
+            <label>Reload Volume</label>
+            <input type="range" id="vol-reload" min="0" max="1" step="0.05" value="1">
+        </div>
+
+        <button id="btn-back" class="menu-btn">Back</button>
     </div>
 
     <!-- Three.js from CDN -->
@@ -231,6 +301,11 @@
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         let gunshotBuffer = null;
 
+        // --- SETTINGS VARIABLES ---
+        let volMaster = 1.0;
+        let volShoot = 1.0;
+        let volReload = 1.0;
+
         init();
         animate();
 
@@ -303,18 +378,43 @@
             document.addEventListener('contextmenu', event => event.preventDefault());
 
             const instructions = document.getElementById('instructions');
-            instructions.addEventListener('click', () => {
+            instructions.addEventListener('click', (e) => {
+                // Prevent starting game if settings button is clicked
+                if (e.target.id === 'btn-settings') return;
                 document.body.requestPointerLock();
             });
+
+            // --- MENU EVENT LISTENERS ---
+            document.getElementById('btn-settings').addEventListener('click', (e) => {
+                e.stopPropagation();
+                document.getElementById('instructions').style.display = 'none';
+                document.getElementById('settings-modal').style.display = 'block';
+            });
+
+            document.getElementById('btn-back').addEventListener('click', () => {
+                document.getElementById('settings-modal').style.display = 'none';
+                document.getElementById('instructions').style.display = 'block';
+            });
+
+            // Sliders
+            document.getElementById('vol-master').addEventListener('input', (e) => volMaster = parseFloat(e.target.value));
+            document.getElementById('vol-shoot').addEventListener('input', (e) => volShoot = parseFloat(e.target.value));
+            document.getElementById('vol-reload').addEventListener('input', (e) => volReload = parseFloat(e.target.value));
+
 
             document.addEventListener('pointerlockchange', () => {
                 if (document.pointerLockElement === document.body) {
                     isLocked = true;
                     instructions.style.display = 'none';
+                    document.getElementById('settings-modal').style.display = 'none';
                     audioCtx.resume();
                 } else {
                     isLocked = false;
-                    instructions.style.display = 'block';
+                    // If we just exited settings, don't show instructions? 
+                    // Simpler logic: if not locked, show instructions unless settings is open
+                    if (document.getElementById('settings-modal').style.display === 'none') {
+                        instructions.style.display = 'block';
+                    }
                     isFiring = false;
                 }
             });
@@ -373,6 +473,10 @@
             playerHand.add(knifeGroup);
             playerHand.add(flashGroup);
 
+            // FIX: Reset activeWeapon to null before first switch.
+            // This forces switchWeapon('rifle') to run fully, hiding the knife/flashbang 
+            // which otherwise default to visible and obstruct the camera.
+            activeWeapon = null; 
             switchWeapon('rifle');
         }
 
@@ -691,10 +795,25 @@
             }, 300);
         }
 
+        function getVolume(type) {
+            let v = volMaster;
+            if (type === 'shoot') v *= volShoot;
+            // Reload sounds group
+            if (['mag_out', 'mag_in', 'rack', 'shell_eject'].includes(type)) v *= volReload;
+            return v;
+        }
+
         function playSound(type, intensity = 1.0) {
             if (audioCtx.state === 'suspended') audioCtx.resume();
             const t = audioCtx.currentTime;
             
+            // Get multplier
+            const vol = getVolume(type);
+
+            // FIX: If volume is effectively zero, simply return to avoid playing empty sounds and 
+            // causing exponentialRamp errors with 0 values.
+            if (vol <= 0.0001) return;
+
             if (type === 'shoot') {
                 const osc = audioCtx.createOscillator();
                 const gain = audioCtx.createGain();
@@ -703,8 +822,11 @@
                 osc.type = 'sawtooth';
                 osc.frequency.setValueAtTime(100, t);
                 osc.frequency.exponentialRampToValueAtTime(20, t + 0.1);
-                gain.gain.setValueAtTime(0.5, t);
-                gain.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
+                
+                // Apply vol
+                gain.gain.setValueAtTime(0.5 * vol, t);
+                gain.gain.exponentialRampToValueAtTime(0.01 * vol, t + 0.15);
+                
                 osc.start(t);
                 osc.stop(t + 0.2);
                 
@@ -717,8 +839,11 @@
                 const noiseGain = audioCtx.createGain();
                 noiseSrc.connect(noiseGain);
                 noiseGain.connect(audioCtx.destination);
-                noiseGain.gain.setValueAtTime(0.5, t);
-                noiseGain.gain.exponentialRampToValueAtTime(0.01, t + 0.2);
+                
+                // Apply vol
+                noiseGain.gain.setValueAtTime(0.5 * vol, t);
+                noiseGain.gain.exponentialRampToValueAtTime(0.01 * vol, t + 0.2);
+                
                 noiseSrc.start(t);
 
             } else if (type === 'swish') {
@@ -735,9 +860,11 @@
                 filter.frequency.linearRampToValueAtTime(3000, t + 0.1);
                 filter.frequency.linearRampToValueAtTime(600, t + 0.25); 
                 const gain = audioCtx.createGain();
-                gain.gain.setValueAtTime(0.01, t);
-                gain.gain.linearRampToValueAtTime(0.6, t + 0.08); 
-                gain.gain.exponentialRampToValueAtTime(0.01, t + 0.25); 
+                
+                gain.gain.setValueAtTime(0.01 * vol, t);
+                gain.gain.linearRampToValueAtTime(0.6 * vol, t + 0.08); 
+                gain.gain.exponentialRampToValueAtTime(0.01 * vol, t + 0.25); 
+                
                 noise.connect(filter);
                 filter.connect(gain);
                 gain.connect(audioCtx.destination);
@@ -752,8 +879,10 @@
                 osc.type = 'square';
                 osc.frequency.setValueAtTime(150, t);
                 osc.frequency.exponentialRampToValueAtTime(40, t + 0.05);
-                gain.gain.setValueAtTime(0.5, t);
-                gain.gain.exponentialRampToValueAtTime(0.01, t + 0.05);
+                
+                gain.gain.setValueAtTime(0.5 * vol, t);
+                gain.gain.exponentialRampToValueAtTime(0.01 * vol, t + 0.05);
+                
                 osc.start(t);
                 osc.stop(t + 0.1);
             } else if (type === 'throw') {
@@ -763,8 +892,10 @@
                 gain.connect(audioCtx.destination);
                 osc.frequency.setValueAtTime(400, t);
                 osc.frequency.linearRampToValueAtTime(200, t + 0.1);
-                gain.gain.setValueAtTime(0.2, t);
+                
+                gain.gain.setValueAtTime(0.2 * vol, t);
                 gain.gain.linearRampToValueAtTime(0, t + 0.1);
+                
                 osc.start(t);
                 osc.stop(t + 0.15);
             } else if (type === 'bang') {
@@ -774,8 +905,10 @@
                 gain.connect(audioCtx.destination);
                 osc.type = 'sine';
                 osc.frequency.setValueAtTime(2500, t);
-                gain.gain.setValueAtTime(0.3 * intensity, t);
-                gain.gain.exponentialRampToValueAtTime(0.01, t + 2.0);
+                
+                gain.gain.setValueAtTime(0.3 * intensity * vol, t);
+                gain.gain.exponentialRampToValueAtTime(0.01 * vol, t + 2.0);
+                
                 osc.start(t);
                 osc.stop(t + 2.5);
 
@@ -788,8 +921,10 @@
                 const ng = audioCtx.createGain();
                 noise.connect(ng);
                 ng.connect(audioCtx.destination);
-                ng.gain.setValueAtTime(1.0 * intensity, t);
-                ng.gain.exponentialRampToValueAtTime(0.01, t + 0.5);
+                
+                ng.gain.setValueAtTime(1.0 * intensity * vol, t);
+                ng.gain.exponentialRampToValueAtTime(0.01 * vol, t + 0.5);
+                
                 noise.start(t);
             } 
             // NEW SOUNDS
@@ -805,8 +940,10 @@
                 filter.type = 'highpass';
                 filter.frequency.value = 1000;
                 const gain = audioCtx.createGain();
-                gain.gain.setValueAtTime(0.5, t);
-                gain.gain.exponentialRampToValueAtTime(0.01, t + 0.2);
+                
+                gain.gain.setValueAtTime(0.5 * vol, t);
+                gain.gain.exponentialRampToValueAtTime(0.01 * vol, t + 0.2);
+                
                 noise.connect(filter);
                 filter.connect(gain);
                 gain.connect(audioCtx.destination);
@@ -820,8 +957,10 @@
                 osc.type = 'square';
                 osc.frequency.setValueAtTime(150, t);
                 osc.frequency.exponentialRampToValueAtTime(0.01, t + 0.1);
-                gain.gain.setValueAtTime(0.4, t);
-                gain.gain.exponentialRampToValueAtTime(0.01, t + 0.1);
+                
+                gain.gain.setValueAtTime(0.4 * vol, t);
+                gain.gain.exponentialRampToValueAtTime(0.01 * vol, t + 0.1);
+                
                 osc.start(t);
                 osc.stop(t + 0.1);
 
@@ -835,8 +974,10 @@
                 filter.type = 'lowpass';
                 filter.frequency.value = 600;
                 const nGain = audioCtx.createGain();
-                nGain.gain.setValueAtTime(0.6, t);
-                nGain.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
+                
+                nGain.gain.setValueAtTime(0.6 * vol, t);
+                nGain.gain.exponentialRampToValueAtTime(0.01 * vol, t + 0.15);
+                
                 noise.connect(filter);
                 filter.connect(nGain);
                 nGain.connect(audioCtx.destination);
@@ -859,9 +1000,9 @@
                 filter.frequency.linearRampToValueAtTime(1000, t + 0.2);
 
                 const gain = audioCtx.createGain();
-                gain.gain.setValueAtTime(0.01, t);
-                gain.gain.linearRampToValueAtTime(0.4, t + 0.05);
-                gain.gain.linearRampToValueAtTime(0.01, t + 0.3);
+                gain.gain.setValueAtTime(0.01 * vol, t);
+                gain.gain.linearRampToValueAtTime(0.4 * vol, t + 0.05);
+                gain.gain.linearRampToValueAtTime(0.01 * vol, t + 0.3);
 
                 noise.connect(filter);
                 filter.connect(gain);
@@ -876,8 +1017,8 @@
                 osc.type = 'triangle';
                 osc.frequency.setValueAtTime(300, t + 0.1);
                 oscGain.gain.setValueAtTime(0, t);
-                oscGain.gain.setValueAtTime(0.3, t + 0.1);
-                oscGain.gain.exponentialRampToValueAtTime(0.01, t + 0.3);
+                oscGain.gain.setValueAtTime(0.3 * vol, t + 0.1);
+                oscGain.gain.exponentialRampToValueAtTime(0.01 * vol, t + 0.3);
                 osc.start(t);
                 osc.stop(t+0.4);
 
@@ -891,8 +1032,10 @@
                 // Randomize pitch slightly
                 const freq = 1800 + Math.random() * 400;
                 osc.frequency.setValueAtTime(freq, t);
-                gain.gain.setValueAtTime(0.05 * intensity, t); // Quiet
-                gain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+                
+                gain.gain.setValueAtTime(0.05 * intensity * vol, t); // Quiet
+                gain.gain.exponentialRampToValueAtTime(0.001 * vol, t + 0.1);
+                
                 osc.start(t);
                 osc.stop(t + 0.15);
             }
@@ -990,7 +1133,8 @@
             let kickUp = 0.11 + Math.random() * 0.06; 
             let kickSide = (Math.random() - 0.5) * 0.1;
             
-            const recoilMod = isCrouched ? 0.3 : 1.0;
+            // Increased standing recoil multiplier from 1.0 to 2.0
+            const recoilMod = isCrouched ? 0.3 : 2.0;
             kickUp *= recoilMod;
             kickSide *= recoilMod;
 
