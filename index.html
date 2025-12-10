@@ -207,6 +207,7 @@
         
         // Projectiles
         let grenades = [];
+        let shells = []; // Array for bullet casings
         let flashIntensity = 0;
 
         // Animation State
@@ -790,6 +791,110 @@
                 ng.gain.setValueAtTime(1.0 * intensity, t);
                 ng.gain.exponentialRampToValueAtTime(0.01, t + 0.5);
                 noise.start(t);
+            } 
+            // NEW SOUNDS
+            else if (type === 'mag_out') {
+                // Clicking/Sliding Sound
+                const bufferSize = audioCtx.sampleRate * 0.3;
+                const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+                const data = buffer.getChannelData(0);
+                for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+                const noise = audioCtx.createBufferSource();
+                noise.buffer = buffer;
+                const filter = audioCtx.createBiquadFilter();
+                filter.type = 'highpass';
+                filter.frequency.value = 1000;
+                const gain = audioCtx.createGain();
+                gain.gain.setValueAtTime(0.5, t);
+                gain.gain.exponentialRampToValueAtTime(0.01, t + 0.2);
+                noise.connect(filter);
+                filter.connect(gain);
+                gain.connect(audioCtx.destination);
+                noise.start(t);
+            } else if (type === 'mag_in') {
+                // Heavier Thud/Click
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.type = 'square';
+                osc.frequency.setValueAtTime(150, t);
+                osc.frequency.exponentialRampToValueAtTime(0.01, t + 0.1);
+                gain.gain.setValueAtTime(0.4, t);
+                gain.gain.exponentialRampToValueAtTime(0.01, t + 0.1);
+                osc.start(t);
+                osc.stop(t + 0.1);
+
+                const bufferSize = audioCtx.sampleRate * 0.2;
+                const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+                const data = buffer.getChannelData(0);
+                for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+                const noise = audioCtx.createBufferSource();
+                noise.buffer = buffer;
+                const filter = audioCtx.createBiquadFilter();
+                filter.type = 'lowpass';
+                filter.frequency.value = 600;
+                const nGain = audioCtx.createGain();
+                nGain.gain.setValueAtTime(0.6, t);
+                nGain.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
+                noise.connect(filter);
+                filter.connect(nGain);
+                nGain.connect(audioCtx.destination);
+                noise.start(t);
+
+            } else if (type === 'rack') {
+                // Metallic Slide
+                const bufferSize = audioCtx.sampleRate * 0.4;
+                const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+                const data = buffer.getChannelData(0);
+                for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+                const noise = audioCtx.createBufferSource();
+                noise.buffer = buffer;
+                
+                const filter = audioCtx.createBiquadFilter();
+                filter.type = 'bandpass';
+                filter.Q.value = 5.0; // Resonant
+                filter.frequency.setValueAtTime(1200, t);
+                filter.frequency.linearRampToValueAtTime(2000, t + 0.1);
+                filter.frequency.linearRampToValueAtTime(1000, t + 0.2);
+
+                const gain = audioCtx.createGain();
+                gain.gain.setValueAtTime(0.01, t);
+                gain.gain.linearRampToValueAtTime(0.4, t + 0.05);
+                gain.gain.linearRampToValueAtTime(0.01, t + 0.3);
+
+                noise.connect(filter);
+                filter.connect(gain);
+                gain.connect(audioCtx.destination);
+                noise.start(t);
+
+                // Add a "clank"
+                const osc = audioCtx.createOscillator();
+                const oscGain = audioCtx.createGain();
+                osc.connect(oscGain);
+                oscGain.connect(audioCtx.destination);
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(300, t + 0.1);
+                oscGain.gain.setValueAtTime(0, t);
+                oscGain.gain.setValueAtTime(0.3, t + 0.1);
+                oscGain.gain.exponentialRampToValueAtTime(0.01, t + 0.3);
+                osc.start(t);
+                osc.stop(t+0.4);
+
+            } else if (type === 'shell_eject') {
+                // High-pitched tink
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.type = 'sine';
+                // Randomize pitch slightly
+                const freq = 1800 + Math.random() * 400;
+                osc.frequency.setValueAtTime(freq, t);
+                gain.gain.setValueAtTime(0.05 * intensity, t); // Quiet
+                gain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+                osc.start(t);
+                osc.stop(t + 0.15);
             }
         }
 
@@ -902,6 +1007,9 @@
             muzzleFlashMesh.scale.set(scale, scale, 1);
             muzzleLight.intensity = 4.0;
             
+            // Eject Shell
+            ejectShell();
+
             setTimeout(() => { muzzleFlashMesh.visible = false; }, 40);
 
             const horizSpeed = new THREE.Vector2(velocity.x, velocity.z).length();
@@ -927,6 +1035,49 @@
                     createBulletHole(hit.point, hit.face.normal);
                 }
             }
+        }
+
+        function ejectShell() {
+            // Create Shell Geometry
+            const shellGeo = new THREE.CylinderGeometry(0.01, 0.01, 0.04, 6);
+            const shellMat = new THREE.MeshStandardMaterial({ color: 0xD4AF37, metalness: 0.8, roughness: 0.3 }); // Gold color
+            const shell = new THREE.Mesh(shellGeo, shellMat);
+            
+            // Calculate Spawn Position (Approximation relative to camera/weapon)
+            // Rifle is roughly at local (0.35, -0.4, -0.7) relative to camera
+            // Ejection port is on the right side of the gun
+            
+            const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+            const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+
+            // Base position relative to camera
+            const spawnPos = camera.position.clone()
+                .add(right.clone().multiplyScalar(0.35)) // Right offset
+                .add(up.clone().multiplyScalar(-0.25))   // Height offset
+                .add(forward.clone().multiplyScalar(0.5)); // Forward offset
+                
+            shell.position.copy(spawnPos);
+            shell.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+            
+            scene.add(shell);
+
+            // Calculate Velocity
+            // Eject to the right and slightly up/back
+            const ejectDir = right.clone().multiplyScalar(2.0 + Math.random())
+                .add(up.clone().multiplyScalar(1.5 + Math.random() * 0.5))
+                .add(forward.clone().multiplyScalar(-0.5 + Math.random() * 0.5));
+            
+            // Add player velocity so shells carry momentum
+            ejectDir.add(velocity);
+
+            shells.push({
+                mesh: shell,
+                velocity: ejectDir,
+                rotVel: new THREE.Vector3(Math.random()*10, Math.random()*10, Math.random()*10),
+                life: 3.0,
+                bounced: false
+            });
         }
 
         function createBulletHole(position, normal, isKnife = false) {
@@ -1161,6 +1312,38 @@
             renderer.render(scene, camera);
             renderer.clearDepth();
             renderer.render(weaponScene, weaponCamera);
+
+            // --- Shell Physics ---
+            for (let i = shells.length - 1; i >= 0; i--) {
+                const s = shells[i];
+                s.life -= delta;
+                s.velocity.y -= GRAVITY * delta;
+                s.mesh.position.add(s.velocity.clone().multiplyScalar(delta));
+                
+                // Rotation
+                s.mesh.rotation.x += s.rotVel.x * delta;
+                s.mesh.rotation.y += s.rotVel.y * delta;
+                s.mesh.rotation.z += s.rotVel.z * delta;
+
+                // Floor Collision
+                if (s.mesh.position.y < 0.01) {
+                    s.mesh.position.y = 0.01;
+                    s.velocity.y *= -0.5; // Bounce
+                    s.velocity.x *= 0.6;
+                    s.velocity.z *= 0.6;
+                    
+                    // Sound on bounce (only if moving fast enough and hasn't bounced too much)
+                    if (Math.abs(s.velocity.y) > 0.5 && !s.bounced) {
+                        playSound('shell_eject', 0.8);
+                        s.bounced = true; // prevent spam
+                    }
+                }
+
+                if (s.life <= 0) {
+                    scene.remove(s.mesh);
+                    shells.splice(i, 1);
+                }
+            }
 
             // --- Grenade Physics ---
             for (let i = grenades.length - 1; i >= 0; i--) {
