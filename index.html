@@ -278,6 +278,7 @@
         // Projectiles
         let grenades = [];
         let shells = []; // Array for bullet casings
+        let droppedMags = []; // Array for dropped magazines
         let flashIntensity = 0;
 
         // Animation State
@@ -550,14 +551,43 @@
             group.add(lHand);
             group.add(lArm);
 
-            // Muzzle Flash
-            const flashGeo = new THREE.PlaneGeometry(0.3, 0.3);
-            const flashMat = new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0.8, side: THREE.DoubleSide, blending: THREE.AdditiveBlending });
-            muzzleFlashMesh = new THREE.Mesh(flashGeo, flashMat);
-            muzzleFlashMesh.position.set(0, 0.02, -0.9); 
+            // --- IMPROVED MUZZLE FLASH ---
+            muzzleFlashMesh = new THREE.Group();
+            muzzleFlashMesh.position.set(0, 0.02, -0.9);
             muzzleFlashMesh.visible = false;
             group.add(muzzleFlashMesh);
 
+            const flashMat = new THREE.MeshBasicMaterial({ 
+                color: 0xffaa00, 
+                transparent: true, 
+                opacity: 0.8, 
+                side: THREE.DoubleSide, 
+                blending: THREE.AdditiveBlending,
+                depthWrite: false // Prevents transparency issues
+            });
+            
+            const coreMat = new THREE.MeshBasicMaterial({ 
+                color: 0xffffff, 
+                transparent: true, 
+                opacity: 0.9, 
+                side: THREE.DoubleSide, 
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            // 1. Cross Planes (Outer Flame)
+            const plane1 = new THREE.Mesh(new THREE.PlaneGeometry(0.35, 0.12), flashMat);
+            muzzleFlashMesh.add(plane1);
+            
+            const plane2 = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 0.35), flashMat);
+            muzzleFlashMesh.add(plane2);
+
+            // 2. Central Core (Bright Hotspot)
+            const core = new THREE.Mesh(new THREE.CircleGeometry(0.06, 8), coreMat);
+            core.position.z = 0.01; // Slight offset to prevent z-fighting
+            muzzleFlashMesh.add(core);
+
+            // Light
             muzzleLight = new THREE.PointLight(0xffaa00, 0, 10);
             muzzleLight.position.set(0, 0.05, -1.0);
             group.add(muzzleLight);
@@ -1124,10 +1154,21 @@
 
         function fireRifle() {
             if (isReloading || isInspecting) return;
-            if (currentAmmo <= 0) { reload(); isFiring = false; return; }
+            
+            // REMOVED AUTO RELOAD: Just stop firing if empty
+            if (currentAmmo <= 0) { 
+                isFiring = false; 
+                return; 
+            }
 
             currentAmmo--;
             updateHUD();
+            
+            // Check if magazine needs to drop immediately
+            if (currentAmmo === 0) {
+                dropMagazine();
+            }
+            
             playSound('shoot');
 
             let kickUp = 0.11 + Math.random() * 0.06; 
@@ -1145,11 +1186,14 @@
             rifleGroup.position.z += 0.25; 
             rifleGroup.rotation.x += 0.2;   
 
+            // Flash Logic
             muzzleFlashMesh.visible = true;
-            muzzleFlashMesh.rotation.z = Math.random() * Math.PI * 2;
-            const scale = 0.8 + Math.random() * 0.5;
+            muzzleFlashMesh.rotation.z = Math.random() * Math.PI * 2; // Random rotation
+            
+            const scale = 0.8 + Math.random() * 0.6; // Random size
             muzzleFlashMesh.scale.set(scale, scale, 1);
-            muzzleLight.intensity = 4.0;
+            
+            muzzleLight.intensity = 5.0;
             
             // Eject Shell
             ejectShell();
@@ -1180,6 +1224,42 @@
                 }
             }
         }
+        
+        function dropMagazine() {
+            const mag = rifleGroup.getObjectByName('magazine');
+            if (!mag || !mag.visible) return;
+            
+            mag.visible = false;
+            
+            // Create world mag physics object
+            const metalMat = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.8, roughness: 0.2 });
+            const worldMag = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.25, 0.1), metalMat);
+            
+            // Position: Offset relative to camera + Camera Position
+            const offset = new THREE.Vector3();
+            mag.getWorldPosition(offset); // Get position in weapon scene (relative to camera view origin)
+            
+            offset.applyQuaternion(camera.quaternion); // Orient offset to world view
+            worldMag.position.copy(camera.position).add(offset);
+            
+            // Rotation: Combined camera rotation + mag local rotation
+            const rotation = new THREE.Quaternion();
+            mag.getWorldQuaternion(rotation);
+            const finalQuat = camera.quaternion.clone().multiply(rotation);
+            worldMag.quaternion.copy(finalQuat);
+            
+            scene.add(worldMag);
+            
+            const vel = velocity.clone();
+            vel.y -= 1.0; // Drop down
+            
+            droppedMags.push({
+                mesh: worldMag,
+                velocity: vel,
+                rotVel: new THREE.Vector3(Math.random(), Math.random(), Math.random()),
+                life: 10.0
+            });
+        }
 
         function ejectShell() {
             // Create Shell Geometry
@@ -1207,8 +1287,8 @@
             scene.add(shell);
 
             // Calculate Velocity
-            // Eject to the right and slightly up/back
-            const ejectDir = right.clone().multiplyScalar(2.0 + Math.random())
+            // Eject to the LEFT (negative right) and slightly up/back
+            const ejectDir = right.clone().multiplyScalar(-(2.0 + Math.random()))
                 .add(up.clone().multiplyScalar(1.5 + Math.random() * 0.5))
                 .add(forward.clone().multiplyScalar(-0.5 + Math.random() * 0.5));
             
@@ -1239,6 +1319,10 @@
 
         function reload() {
             if (isReloading || currentAmmo === MAG_SIZE || reserveAmmo <= 0) return;
+            
+            // Check if we are starting from an empty/dropped mag state
+            const isEmptyStart = (currentAmmo === 0);
+            
             isReloading = true;
             isInspecting = false;
             
@@ -1251,6 +1335,10 @@
             
             let startTime = performance.now();
             
+            // If empty, reload is faster because we skip taking the old mag out
+            // Reduced from 1040 to 832 (Another 1.25x faster)
+            const duration = isEmptyStart ? 832 : RELOAD_TIME;
+            
             // Track sound triggers
             let playedMagOut = false;
             let playedMagIn = false;
@@ -1258,102 +1346,134 @@
             
             const animateReload = () => {
                 const now = performance.now();
-                const progress = (now - startTime) / RELOAD_TIME;
+                const progress = (now - startTime) / duration;
                 
-                // --- PHASE 1: TILT GUN (0% - 20%) ---
-                if (progress < 0.2) {
-                    const t = progress / 0.2;
-                    const ease = 1 - Math.pow(1 - t, 3); // Cubic Ease Out
+                if (isEmptyStart) {
+                    // --- FAST RELOAD (Empty) ---
+                    // Timeline: Tilt -> Insert -> Rack -> Recover
                     
-                    // Tilt gun to look at mag well
-                    rifleGroup.rotation.z = THREE.MathUtils.lerp(0, 0.6, ease); // Tilt Right
-                    rifleGroup.rotation.x = THREE.MathUtils.lerp(0, 0.3, ease); // Pitch Up
-                    rifleGroup.rotation.y = THREE.MathUtils.lerp(0, -0.2, ease); // Turn slightly Left
-                    
-                    // Lift gun slightly
-                    rifleGroup.position.y = THREE.MathUtils.lerp(weaponBasePos.y, weaponBasePos.y + 0.05, ease);
-                }
-                
-                // --- PHASE 2: MAG OUT (20% - 45%) ---
-                else if (progress < 0.45) {
-                    const t = (progress - 0.2) / 0.25;
-                    const dropT = t * t; // Accelerate down (Gravity)
-                    
-                    if (!playedMagOut) {
-                        playSound('mag_out');
-                        playedMagOut = true;
-                    }
-
-                    // Move mag down and rotate it like it's falling
-                    mag.position.lerpVectors(initialMagPos, droppedMagPos, dropT);
-                    mag.rotation.z = THREE.MathUtils.lerp(0.3, 1.5, t); // Spin out
-                    mag.rotation.x = THREE.MathUtils.lerp(0, 0.5, t);
-                    
-                    // Gun gives a little "lightness" recoil as mag leaves
-                    rifleGroup.position.y = weaponBasePos.y + 0.05 + (Math.sin(t * Math.PI) * 0.005);
-                }
-                
-                // --- PHASE 3: MAG IN (45% - 70%) ---
-                else if (progress < 0.70) {
-                    const t = (progress - 0.45) / 0.25;
-                    const ease = 1 - Math.pow(1 - t, 2); // Quadratic Ease Out
-                    
-                    // Instantly snap mag to "New Mag" starting position (invisible transition)
-                    if (t < 0.1) {
-                         mag.rotation.set(0.3, 0, 0); // Reset rotation to standard
-                    }
-
-                    // Slide new mag in from bottom left
-                    mag.position.lerpVectors(newMagStartPos, initialMagPos, ease);
-                    
-                    // Impact frame
-                    if (t > 0.85 && !playedMagIn) {
-                        playSound('mag_in');
-                        playedMagIn = true;
+                    // 1. TILT (0% - 25%)
+                    if (progress < 0.25) {
+                        const t = progress / 0.25;
+                        const ease = 1 - Math.pow(1 - t, 3);
                         
-                        // PHYSICAL KNOCK: Screen shake & Gun bump
-                        recoilScreenShake += 0.015; 
-                        rifleGroup.position.y += 0.02; 
-                        rifleGroup.rotation.x -= 0.05; 
+                        rifleGroup.rotation.z = THREE.MathUtils.lerp(0, 0.6, ease);
+                        rifleGroup.rotation.x = THREE.MathUtils.lerp(0, 0.3, ease);
+                        rifleGroup.rotation.y = THREE.MathUtils.lerp(0, -0.2, ease);
+                        rifleGroup.position.y = THREE.MathUtils.lerp(weaponBasePos.y, weaponBasePos.y + 0.05, ease);
+                        
+                        // Ensure mag stays hidden (it was dropped)
+                        if (progress < 0.1) mag.visible = false;
                     }
-                }
-                
-                // --- PHASE 4: RACK BOLT (70% - 90%) ---
-                else if (progress < 0.90) {
-                    const t = (progress - 0.70) / 0.20;
                     
-                    // Ensure mag is perfectly seated
-                    mag.position.copy(initialMagPos);
+                    // 2. MAG IN (25% - 60%) - Skip removal, go straight to insert
+                    else if (progress < 0.60) {
+                        const t = (progress - 0.25) / 0.35;
+                        const ease = 1 - Math.pow(1 - t, 2);
+                        
+                        // On start of this phase, make mag visible and snap to start pos
+                        if (t < 0.1) {
+                             mag.visible = true; 
+                             mag.rotation.set(0.3, 0, 0);
+                        }
+
+                        mag.position.lerpVectors(newMagStartPos, initialMagPos, ease);
+                        
+                        if (t > 0.85 && !playedMagIn) {
+                            playSound('mag_in');
+                            playedMagIn = true;
+                            recoilScreenShake += 0.015; 
+                            rifleGroup.position.y += 0.02; 
+                            rifleGroup.rotation.x -= 0.05; 
+                        }
+                    }
                     
-                    if (t > 0.1 && !playedRack) {
-                        playSound('rack');
-                        playedRack = true;
-                        // RACK SHAKE
-                        recoilScreenShake += 0.025; 
+                    // 3. RACK (60% - 85%)
+                    else if (progress < 0.85) {
+                        const t = (progress - 0.60) / 0.25;
+                        mag.position.copy(initialMagPos); // Lock mag
+                        
+                        if (t > 0.1 && !playedRack) {
+                            playSound('rack');
+                            playedRack = true;
+                            recoilScreenShake += 0.025; 
+                        }
+
+                        let rackOffset = 0;
+                        if (t < 0.5) rackOffset = t * 2;
+                        else rackOffset = 1 - ((t - 0.5) * 2);
+                        
+                        rifleGroup.position.z = weaponBasePos.z + (rackOffset * 0.15); 
+                        rifleGroup.rotation.x = 0.3 - (rackOffset * 0.1);
+                        rifleGroup.rotation.z = 0.6 + (Math.random() * 0.02);
+                    }
+                    
+                    // 4. RECOVER (85% - 100%)
+                    else {
+                        const t = (progress - 0.85) / 0.15;
+                        rifleGroup.rotation.z = THREE.MathUtils.lerp(0.6, 0, t);
+                        rifleGroup.rotation.x = THREE.MathUtils.lerp(0.3, 0, t);
+                        rifleGroup.rotation.y = THREE.MathUtils.lerp(-0.2, 0, t);
+                        rifleGroup.position.y = THREE.MathUtils.lerp(weaponBasePos.y + 0.05, weaponBasePos.y, t);
+                        rifleGroup.position.z = THREE.MathUtils.lerp(weaponBasePos.z, weaponBasePos.z, t);
                     }
 
-                    // Bolt Pull Animation (Fast Pull, Fast Release)
-                    let rackOffset = 0;
-                    if (t < 0.5) rackOffset = t * 2; // Pull back
-                    else rackOffset = 1 - ((t - 0.5) * 2); // Release forward
+                } else {
+                    // --- NORMAL RELOAD (Standard) ---
                     
-                    // Gun moves backward (kick) and shakes
-                    rifleGroup.position.z = weaponBasePos.z + (rackOffset * 0.15); 
-                    rifleGroup.rotation.x = 0.3 - (rackOffset * 0.1); // Dip nose on pull
-                    rifleGroup.rotation.z = 0.6 + (Math.random() * 0.02); // Rattle
-                }
-                
-                // --- PHASE 5: RECOVER (90% - 100%) ---
-                else {
-                    const t = (progress - 0.90) / 0.10;
-                    
-                    // Smooth return to idle position
-                    rifleGroup.rotation.z = THREE.MathUtils.lerp(0.6, 0, t);
-                    rifleGroup.rotation.x = THREE.MathUtils.lerp(0.3, 0, t);
-                    rifleGroup.rotation.y = THREE.MathUtils.lerp(-0.2, 0, t);
-                    
-                    rifleGroup.position.y = THREE.MathUtils.lerp(weaponBasePos.y + 0.05, weaponBasePos.y, t);
-                    rifleGroup.position.z = THREE.MathUtils.lerp(weaponBasePos.z, weaponBasePos.z, t);
+                    // 1. TILT (0% - 20%)
+                    if (progress < 0.2) {
+                        const t = progress / 0.2;
+                        const ease = 1 - Math.pow(1 - t, 3);
+                        rifleGroup.rotation.z = THREE.MathUtils.lerp(0, 0.6, ease);
+                        rifleGroup.rotation.x = THREE.MathUtils.lerp(0, 0.3, ease);
+                        rifleGroup.rotation.y = THREE.MathUtils.lerp(0, -0.2, ease);
+                        rifleGroup.position.y = THREE.MathUtils.lerp(weaponBasePos.y, weaponBasePos.y + 0.05, ease);
+                        // Ensure visible if standard reload
+                        if (progress < 0.05) mag.visible = true;
+                    }
+                    // 2. MAG OUT (20% - 45%)
+                    else if (progress < 0.45) {
+                        const t = (progress - 0.2) / 0.25;
+                        const dropT = t * t;
+                        if (!playedMagOut) { playSound('mag_out'); playedMagOut = true; }
+                        mag.position.lerpVectors(initialMagPos, droppedMagPos, dropT);
+                        mag.rotation.z = THREE.MathUtils.lerp(0.3, 1.5, t);
+                        mag.rotation.x = THREE.MathUtils.lerp(0, 0.5, t);
+                        rifleGroup.position.y = weaponBasePos.y + 0.05 + (Math.sin(t * Math.PI) * 0.005);
+                    }
+                    // 3. MAG IN (45% - 70%)
+                    else if (progress < 0.70) {
+                        const t = (progress - 0.45) / 0.25;
+                        const ease = 1 - Math.pow(1 - t, 2);
+                        if (t < 0.1) mag.rotation.set(0.3, 0, 0);
+                        mag.position.lerpVectors(newMagStartPos, initialMagPos, ease);
+                        if (t > 0.85 && !playedMagIn) {
+                            playSound('mag_in'); playedMagIn = true;
+                            recoilScreenShake += 0.015; rifleGroup.position.y += 0.02; rifleGroup.rotation.x -= 0.05; 
+                        }
+                    }
+                    // 4. RACK (70% - 90%)
+                    else if (progress < 0.90) {
+                        const t = (progress - 0.70) / 0.20;
+                        mag.position.copy(initialMagPos);
+                        if (t > 0.1 && !playedRack) {
+                            playSound('rack'); playedRack = true; recoilScreenShake += 0.025; 
+                        }
+                        let rackOffset = (t < 0.5) ? t * 2 : 1 - ((t - 0.5) * 2);
+                        rifleGroup.position.z = weaponBasePos.z + (rackOffset * 0.15); 
+                        rifleGroup.rotation.x = 0.3 - (rackOffset * 0.1);
+                        rifleGroup.rotation.z = 0.6 + (Math.random() * 0.02);
+                    }
+                    // 5. RECOVER (90% - 100%)
+                    else {
+                        const t = (progress - 0.90) / 0.10;
+                        rifleGroup.rotation.z = THREE.MathUtils.lerp(0.6, 0, t);
+                        rifleGroup.rotation.x = THREE.MathUtils.lerp(0.3, 0, t);
+                        rifleGroup.rotation.y = THREE.MathUtils.lerp(-0.2, 0, t);
+                        rifleGroup.position.y = THREE.MathUtils.lerp(weaponBasePos.y + 0.05, weaponBasePos.y, t);
+                        rifleGroup.position.z = THREE.MathUtils.lerp(weaponBasePos.z, weaponBasePos.z, t);
+                    }
                 }
 
                 if (progress < 1) {
@@ -1364,6 +1484,7 @@
                     rifleGroup.position.copy(weaponBasePos);
                     mag.position.copy(initialMagPos); 
                     mag.rotation.set(0.3, 0, 0); 
+                    mag.visible = true; // Ensure visible after complete
                     
                     const needed = MAG_SIZE - currentAmmo;
                     const toAdd = Math.min(needed, reserveAmmo);
@@ -1478,7 +1599,7 @@
                     
                     // Sound on bounce (only if moving fast enough and hasn't bounced too much)
                     if (Math.abs(s.velocity.y) > 0.5 && !s.bounced) {
-                        playSound('shell_eject', 0.8);
+                        // Removed shell eject sound
                         s.bounced = true; // prevent spam
                     }
                 }
@@ -1486,6 +1607,33 @@
                 if (s.life <= 0) {
                     scene.remove(s.mesh);
                     shells.splice(i, 1);
+                }
+            }
+            
+            // --- Dropped Mag Physics ---
+            for (let i = droppedMags.length - 1; i >= 0; i--) {
+                const m = droppedMags[i];
+                m.life -= delta;
+                m.velocity.y -= GRAVITY * delta;
+                m.mesh.position.add(m.velocity.clone().multiplyScalar(delta));
+                
+                // Rotation
+                m.mesh.rotation.x += m.rotVel.x * delta;
+                m.mesh.rotation.y += m.rotVel.y * delta;
+                m.mesh.rotation.z += m.rotVel.z * delta;
+
+                // Floor Collision
+                if (m.mesh.position.y < 0.125) { // Roughly half height
+                    m.mesh.position.y = 0.125;
+                    m.velocity.y *= -0.3; // Low bounce
+                    m.velocity.x *= 0.5;
+                    m.velocity.z *= 0.5;
+                    m.rotVel.multiplyScalar(0.8);
+                }
+
+                if (m.life <= 0) {
+                    scene.remove(m.mesh);
+                    droppedMags.splice(i, 1);
                 }
             }
 
@@ -1628,35 +1776,54 @@
                     
                     if (isInspecting) {
                         inspectTimer += delta;
-                        if (inspectTimer < 0.4) {
-                            const t = inspectTimer / 0.4;
-                            const ease = 1 - Math.pow(1 - t, 3); 
-                            rifleGroup.rotation.y = ease * 0.8; 
-                            rifleGroup.rotation.z = ease * 0.4; 
-                            rifleGroup.rotation.x = ease * 0.2; 
-                            rifleGroup.position.x -= ease * 0.08;
-                            rifleGroup.position.y += ease * 0.03;
-                        }
-                        else if (inspectTimer < 2.5) {
-                            let rY = 0.8; let rZ = 0.4; let rX = 0.2;
-                            let pX = -0.08; let pY = 0.03;
-                            const t = inspectTimer - 0.4;
-                            rY += Math.sin(t) * 0.05;      
-                            rX += Math.cos(t * 0.8) * 0.05; 
-                            rZ += Math.sin(t * 1.2) * 0.02; 
-                            rifleGroup.rotation.y = rY;
-                            rifleGroup.rotation.z = rZ;
-                            rifleGroup.rotation.x = rX;
-                            rifleGroup.position.x += pX;
-                            rifleGroup.position.y += pY;
+                        
+                        // --- INVESTIGATIVE INSPECT ANIMATION ---
+                        // Total Duration: ~3.5s
+                        // 1. Lift & Check Side (0s - 1.5s)
+                        // 2. Roll & Check Top (1.5s - 3.5s)
+                        // 3. Auto-return (handled by else block)
+
+                        if (inspectTimer < 1.5) {
+                            // Phase 1: Smooth lift to check the side/magwell
+                            const t = Math.min(inspectTimer / 1.2, 1);
+                            const ease = 1 - Math.pow(1 - t, 3); // Cubic Ease Out
+                            
+                            // Rotate Y to show side, Z to tilt mag up slightly
+                            rifleGroup.rotation.y = ease * 1.0; 
+                            rifleGroup.rotation.z = ease * 0.35;
+                            rifleGroup.rotation.x = ease * 0.15;
+                            
+                            // Bring closer and center
+                            rifleGroup.position.x = weaponBasePos.x - (ease * 0.12);
+                            rifleGroup.position.y = weaponBasePos.y + (ease * 0.08);
+                            rifleGroup.position.z = weaponBasePos.z + (ease * 0.05);
+                        } 
+                        else if (inspectTimer < 3.5) {
+                            // Phase 2: Slow smooth transition to looking at the top
+                            const t = (inspectTimer - 1.5) / 2.0; 
+                            const smooth = t * t * (3 - 2 * t); // Smoothstep curve
+                            
+                            // Rotate from Side View to Top/Angle View
+                            rifleGroup.rotation.y = THREE.MathUtils.lerp(1.0, 0.4, smooth);
+                            rifleGroup.rotation.z = THREE.MathUtils.lerp(0.35, -0.1, smooth);
+                            rifleGroup.rotation.x = THREE.MathUtils.lerp(0.15, 0.05, smooth);
+                            
+                            // Slight breathing bob to simulate focus
+                            const bob = Math.sin(t * Math.PI * 2) * 0.005;
+                            rifleGroup.position.y = weaponBasePos.y + 0.08 + bob;
+                            // Drift back right slightly
+                            rifleGroup.position.x = THREE.MathUtils.lerp(weaponBasePos.x - 0.12, weaponBasePos.x - 0.05, smooth);
                         }
                         else {
                             isInspecting = false;
                         }
                     } else {
-                        rifleGroup.rotation.x = THREE.MathUtils.lerp(rifleGroup.rotation.x, 0, delta * 10);
-                        rifleGroup.rotation.y = THREE.MathUtils.lerp(rifleGroup.rotation.y, 0, delta * 10);
-                        rifleGroup.rotation.z = THREE.MathUtils.lerp(rifleGroup.rotation.z, 0, delta * 10);
+                        // Smooth return to idle
+                        rifleGroup.rotation.x = THREE.MathUtils.lerp(rifleGroup.rotation.x, 0, delta * 8);
+                        rifleGroup.rotation.y = THREE.MathUtils.lerp(rifleGroup.rotation.y, 0, delta * 8);
+                        rifleGroup.rotation.z = THREE.MathUtils.lerp(rifleGroup.rotation.z, 0, delta * 8);
+                        
+                        // Positional return is handled by the main position.set logic at top of block
                     }
                 }
                 
