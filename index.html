@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CS:GO Gun Sim</title>
+    <title>Mini Mirage Gun Sim</title>
     <!-- Import Map to resolve 'three' inside GLTFLoader -->
     <script type="importmap">
         {
@@ -26,6 +26,7 @@
             transform: translate(-50%, -50%);
             pointer-events: none;
             z-index: 5;
+            transition: opacity 0.1s;
         }
         
         .ch-line {
@@ -39,6 +40,40 @@
         .ch-bottom { width: 2px; height: 10px; top: 4px; left: -1px; }
         .ch-left { width: 10px; height: 2px; top: -1px; left: -14px; }
         .ch-right { width: 10px; height: 2px; top: -1px; left: 4px; }
+
+        /* Special Scope Crosshair (Red Dot) - NOW PART OF OVERLAY */
+        #scope-dot {
+            display: none !important; /* Overridden by new overlay logic */
+        }
+
+        /* Scope Overlay */
+        #scope-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 15;
+            display: none;
+            opacity: 0;
+        }
+        #scope-overlay .scope-vignette {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            /* Widened transparent area to 35% (a little more visibility) */
+            background: radial-gradient(circle, transparent 35%, black 85%);
+        }
+        #scope-overlay .scope-line {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.9);
+        }
+        #scope-overlay .scope-line-h {
+            top: 50%; left: 0; width: 100%; height: 2px; transform: translateY(-50%);
+        }
+        #scope-overlay .scope-line-v {
+            left: 50%; top: 0; height: 100%; width: 2px; transform: translateX(-50%);
+        }
 
         #hud {
             position: absolute;
@@ -179,6 +214,16 @@
         <div class="ch-line ch-left" id="ch-left"></div>
         <div class="ch-line ch-right" id="ch-right"></div>
     </div>
+    
+    <!-- Scope Overlay -->
+    <div id="scope-overlay">
+        <div class="scope-vignette"></div>
+        <div class="scope-line scope-line-h"></div>
+        <div class="scope-line scope-line-v"></div>
+    </div>
+
+    <!-- Scope Dot (Kept in DOM but hidden via CSS) -->
+    <div id="scope-dot"></div>
 
     <div id="speed-box">VEL: <span id="vel-display">0</span></div>
 
@@ -192,12 +237,13 @@
 
     <!-- Main Menu / Instructions -->
     <div id="instructions">
-        <h1 style="margin-top:0;">CS:GO Gun Sim</h1>
+        <h1 style="margin-top:0;">Mini Mirage Gun Sim</h1>
         <p>Click Area to Start</p>
         <p><span class="key">WASD</span> Move &nbsp; <span class="key">SPACE</span> Jump (Hold to Bhop)</p>
         <p><span class="key">C</span> Crouch &nbsp; <span class="key">R</span> Reload</p>
         <p><span class="key">1</span> Rifle &nbsp; <span class="key">3</span> Knife &nbsp; <span class="key">4</span> Flash</p>
-        <p><span class="key">F (Hold)</span> Inspect &nbsp; <span class="key">L-Click</span> Shoot</p>
+        <p><span class="key">L-Click</span> Shoot &nbsp; <span class="key">R-Click (Hold)</span> Scope</p>
+        <p><span class="key">F (Hold)</span> Inspect</p>
         <button id="btn-settings" class="menu-btn">Settings</button>
     </div>
 
@@ -234,9 +280,9 @@
         const CROUCH_SPEED_KNIFE = 3.375; 
         
         // BHOP TUNING
-        const MAX_AIR_SPEED = 2.0;    // Increased from 0.8 to allow faster strafe gain
+        const MAX_AIR_SPEED = 2.0;    
         const ACCEL = 6.5;             
-        const AIR_ACCEL = 100.0;       // Increased from 50.0 for sharper air turns
+        const AIR_ACCEL = 100.0;       
         const FRICTION = 6.0;          
         const STOP_SPEED = 2.0;        
         const GRAVITY = 18.0;          
@@ -275,18 +321,34 @@
         let isFiring = false, lastFireTime = 0;
         let currentAmmo = 30, reserveAmmo = 90, isReloading = false, currentSpread = 0;
         
+        // Scope Logic
+        let isScoped = false;
+        let scopeFactor = 0; // 0 = Hip, 1 = Scoped
+        const BASE_FOV = 85; // Increased by 10 (was 75)
+        const SCOPED_FOV = 20; // Set to 20
+
         // Projectiles
         let grenades = [];
         let shells = []; // Array for bullet casings
         let droppedMags = []; // Array for dropped magazines
         let flashIntensity = 0;
+        
+        // Bullet Holes & Effects
+        let decals = [];
+        const MAX_DECALS = 50;
+        let debris = [];
 
         // Animation State
         let weaponBasePos = new THREE.Vector3(0.35, -0.4, -0.7); 
+        // We define the target position for scoping here
+        // Align X to 0 (center), Y up to eye level, Z slightly closer
+        let scopedPos = new THREE.Vector3(0, -0.23, -0.5); 
+
         let knifeBasePos = new THREE.Vector3(0.25, -0.2, -0.45); 
         let flashBasePos = new THREE.Vector3(0.25, -0.3, -0.5); 
         
         let swayPos = new THREE.Vector3(0,0,0);
+        let swayRot = new THREE.Vector3(0,0,0); // NEW: Rotational Sway
         let bobTimer = 0;
 
         // Animation Timers
@@ -307,31 +369,62 @@
         let volShoot = 1.0;
         let volReload = 1.0;
 
+        // --- OPTIMIZATION RESOURCES ---
+        let sharedShellGeo, sharedShellMat;
+        let sharedDebrisGeo; // Removed sharedDebrisMat, we use dynamic cached ones now
+        let sharedDecalGeo, sharedDecalHoleMat, sharedDecalOuterMat;
+        
+        // Cache for colored debris materials to avoid creating 100s of materials
+        const debrisMatCache = {};
+
+        // --- PHYSICS GLOBALS ---
+        let mapColliders = []; // Walls/Boxes for horizontal collision
+        let mapGround = [];    // Floors/Ramps for vertical raycasting
+
+        // Global raycaster for ground checks
+        const groundRaycaster = new THREE.Raycaster();
+
         init();
         animate();
 
         function init() {
-            // Load Audio
-            fetch('https://freesound.org/data/previews/163/163456_239630-lq.mp3') // Placeholder generic pop
+            // ... (Audio fetch code remains same) ...
+            fetch('https://freesound.org/data/previews/163/163456_239630-lq.mp3') 
                 .then(r => r.arrayBuffer())
                 .then(b => audioCtx.decodeAudioData(b))
                 .then(a => { gunshotBuffer = a; })
                 .catch(() => console.log("Audio load fallback"));
 
+            // --- INIT OPTIMIZED RESOURCES ---
+            // Shells: Single Geometry and Material
+            sharedShellGeo = new THREE.CylinderGeometry(0.01, 0.01, 0.04, 6);
+            sharedShellMat = new THREE.MeshStandardMaterial({ color: 0xD4AF37, metalness: 0.8, roughness: 0.3 });
+
+            // Debris: Unit Box Geometry (scaled per particle)
+            // Material is now dynamic based on hit object
+            sharedDebrisGeo = new THREE.BoxGeometry(1, 1, 1);
+
+            // Decals: Unit Circle Geometry
+            sharedDecalGeo = new THREE.CircleGeometry(1, 8);
+            // Materials serve as templates (cloned for fading)
+            sharedDecalHoleMat = new THREE.MeshBasicMaterial({ color: 0x050505, side: THREE.DoubleSide, transparent: true, opacity: 1.0, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1 });
+            sharedDecalOuterMat = new THREE.MeshBasicMaterial({ color: 0x333333, side: THREE.DoubleSide, transparent: true, opacity: 0.5, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1 });
+
             // 1. MAIN SCENE (World)
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x87CEEB);
+            // MIRAGE SKY COLOR (Warm Blue/Orange tint)
+            scene.background = new THREE.Color(0x87CEEB); 
             scene.fog = new THREE.Fog(0x87CEEB, 0, 70);
 
             // 2. WEAPON SCENE (Overlay)
             weaponScene = new THREE.Scene();
 
             // Main Camera (Moves through world)
-            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.1, 1000);
             camera.rotation.order = 'YXZ'; 
 
             // Weapon Camera (Static, renders only gun)
-            weaponCamera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.01, 100);
+            weaponCamera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.01, 100);
 
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
@@ -339,12 +432,21 @@
             renderer.autoClear = false; 
             document.body.appendChild(renderer.domElement);
 
-            // World Lights
-            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            // World Lights - Warmer Sun for Mirage
+            const ambientLight = new THREE.AmbientLight(0xffedd0, 0.6); // Warm ambient
             scene.add(ambientLight);
-            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            const dirLight = new THREE.DirectionalLight(0xfff5d6, 0.9); // Sunny light
             dirLight.position.set(50, 100, 50);
             dirLight.castShadow = true;
+            // Optimize shadow map
+            dirLight.shadow.mapSize.width = 2048;
+            dirLight.shadow.mapSize.height = 2048;
+            dirLight.shadow.camera.near = 0.5;
+            dirLight.shadow.camera.far = 200;
+            dirLight.shadow.camera.left = -50;
+            dirLight.shadow.camera.right = 50;
+            dirLight.shadow.camera.top = 50;
+            dirLight.shadow.camera.bottom = -50;
             scene.add(dirLight);
 
             // Weapon Lights (Fixed to camera for consistent lighting)
@@ -368,13 +470,25 @@
                         if (e.button === 2) startFire('short');
                     } else if (activeWeapon === 'rifle') {
                         if (e.button === 0) startFire();
+                        // Right click (2) logic
+                        if (e.button === 2) {
+                            if (isReloading) cancelReload();
+                            isScoped = true;
+                            // Block inspect if scoping starts
+                            isInspecting = false;
+                        }
                     } else {
                         if (e.button === 0) startFire();
                     }
                 }
             });
             
-            document.addEventListener('mouseup', () => { isFiring = false; });
+            document.addEventListener('mouseup', (e) => { 
+                if (e.button === 0) isFiring = false; 
+                // Unscope on release of right click
+                if (e.button === 2) isScoped = false;
+            });
+            
             document.addEventListener('mousemove', onMouseMove);
             document.addEventListener('contextmenu', event => event.preventDefault());
 
@@ -411,12 +525,11 @@
                     audioCtx.resume();
                 } else {
                     isLocked = false;
-                    // If we just exited settings, don't show instructions? 
-                    // Simpler logic: if not locked, show instructions unless settings is open
                     if (document.getElementById('settings-modal').style.display === 'none') {
                         instructions.style.display = 'block';
                     }
                     isFiring = false;
+                    isScoped = false; // Force unscope if lost focus
                 }
             });
 
@@ -424,41 +537,108 @@
         }
 
         function createLevel() {
-            const floorGeo = new THREE.PlaneGeometry(100, 100);
-            const floorMat = new THREE.MeshStandardMaterial({ color: 0xddccaa, roughness: 0.8 });
-            const floor = new THREE.Mesh(floorGeo, floorMat);
-            floor.rotation.x = -Math.PI / 2;
-            floor.receiveShadow = true;
-            scene.add(floor);
+            // Clear existing map arrays
+            mapColliders = [];
+            mapGround = [];
 
-            const wallMat = new THREE.MeshStandardMaterial({ color: 0xccbb99 });
-            const createWall = (x, y, z, w, h, d) => {
+            // --- MATERIALS ---
+            const groundMat = new THREE.MeshStandardMaterial({ color: 0xD2B48C, roughness: 0.9 }); // Sand
+            const wallMat = new THREE.MeshStandardMaterial({ color: 0xE8DCCA, roughness: 0.8 }); // Sandstone/Brick
+            const woodMat = new THREE.MeshStandardMaterial({ color: 0x8B5A2B, roughness: 0.8 }); // Crate
+            const darkMat = new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.6 }); // Palace Floor/Details
+            const barrierMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.9, map: null }); // Invisible-ish barriers or metal
+
+            // Helper to create physics-enabled box
+            const createBox = (x, y, z, w, h, d, mat, isGround = false) => {
                 const geo = new THREE.BoxGeometry(w, h, d);
-                const mesh = new THREE.Mesh(geo, wallMat);
+                const mesh = new THREE.Mesh(geo, mat);
                 mesh.position.set(x, y, z);
                 mesh.castShadow = true;
                 mesh.receiveShadow = true;
                 scene.add(mesh);
-            }
+                
+                // Add to colliders
+                const box = new THREE.Box3().setFromObject(mesh);
+                if (!isGround) mapColliders.push(box);
+                else mapGround.push(mesh); 
+                
+                if (!isGround) mapGround.push(mesh); 
+            };
 
-            createWall(0, 5, -20, 40, 10, 1);
-            createWall(-20, 5, 0, 1, 10, 40);
-            createWall(20, 5, 0, 1, 10, 40);
-            createWall(0, 5, 20, 40, 10, 1);
-
-            const crateMat = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
-            const createCrate = (x, z, s) => {
-                const geo = new THREE.BoxGeometry(s, s, s);
-                const mesh = new THREE.Mesh(geo, crateMat);
-                mesh.position.set(x, s/2, z);
+            // Helper for Ramps/Stairs
+            const createRamp = (x, y, z, w, len, angle, mat) => {
+                const geo = new THREE.BoxGeometry(w, 0.2, len);
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.position.set(x, y, z);
+                mesh.rotation.x = angle;
                 mesh.castShadow = true;
                 mesh.receiveShadow = true;
                 scene.add(mesh);
+                mapGround.push(mesh);
+            };
+
+            // --- WINGMAN / MINI MIRAGE LAYOUT ---
+            
+            // 1. MAIN FLOOR (Compact)
+            const floorGeo = new THREE.PlaneGeometry(50, 60);
+            const floor = new THREE.Mesh(floorGeo, groundMat);
+            floor.rotation.x = -Math.PI / 2;
+            floor.position.set(5, 0, 5); // Offset to center site
+            floor.receiveShadow = true;
+            scene.add(floor);
+            mapGround.push(floor);
+
+            // 2. T-RAMP & TETRIS (Entry)
+            createRamp(0, 1.5, 25, 8, 15, -0.2, groundMat); // Ramp
+            
+            // Tetris Boxes
+            createBox(-6, 1, 18, 2, 2, 2, woodMat); 
+            createBox(-6, 1, 20, 2, 2, 2, woodMat); 
+            createBox(-4, 0.5, 20, 2, 1, 2, woodMat);
+
+            // 3. TRIPLE BOX (Site Center)
+            createBox(5, 1.5, 5, 2.5, 3, 2.5, woodMat); 
+            createBox(7, 0.75, 5, 1.5, 1.5, 2, woodMat);
+            
+            // 4. STAIRS (To Jungle) - BLOCKED OFF AT TOP
+            for(let i=0; i<6; i++) {
+                createBox(-8, 0.25 + (i*0.3), 2 - (i*0.8), 6, 0.3, 0.8, wallMat, true);
             }
-            createCrate(0, -10, 2);
-            createCrate(5, -15, 3);
-            createCrate(-5, -8, 2);
-            createCrate(8, 5, 2);
+            // Wall blocking Jungle/Connector
+            createBox(-12, 3, -3, 1, 6, 15, wallMat); 
+
+            // 5. FIREBOX (Corner)
+            createBox(15, 1, -5, 2, 2, 2, woodMat);
+
+            // 6. PALACE (Balcony)
+            createBox(18, 2.2, 10, 10, 0.2, 20, darkMat, true); // Floor
+            createBox(14, 2.2, 5, 0.5, 4.4, 0.5, wallMat); // Pillar
+            createBox(14, 2.2, 10, 0.5, 4.4, 0.5, wallMat); // Pillar
+            createBox(14, 2.2, 15, 0.5, 4.4, 0.5, wallMat); // Pillar
+            
+            // Block deep palace
+            createBox(18, 3, 20, 10, 6, 1, wallMat); 
+
+            // 7. TICKET BOOTH (CT) - BLOCKED
+            createBox(-5, 1.5, -12, 3, 3, 3, woodMat);
+            createBox(-8, 3, -15, 10, 6, 1, wallMat); // Block CT Spawn
+
+            // --- BOUNDARY WALLS (The "Arena" Feel) ---
+            
+            // Back Wall (Site Back)
+            createBox(10, 4, -15, 40, 8, 1, wallMat);
+            
+            // Front Wall (Ramp Back)
+            createBox(0, 4, 32, 40, 8, 1, wallMat);
+            
+            // Left Wall (Jungle/Stairs Side)
+            createBox(-15, 4, 10, 1, 8, 50, wallMat);
+            
+            // Right Wall (Palace Side)
+            createBox(23, 4, 10, 1, 8, 50, wallMat);
+            
+            // Ceiling hints (Shadow casters)
+            createBox(18, 5, 10, 10, 0.2, 20, wallMat); // Palace Roof
         }
 
         function createPlayerModel() {
@@ -474,9 +654,6 @@
             playerHand.add(knifeGroup);
             playerHand.add(flashGroup);
 
-            // FIX: Reset activeWeapon to null before first switch.
-            // This forces switchWeapon('rifle') to run fully, hiding the knife/flashbang 
-            // which otherwise default to visible and obstruct the camera.
             activeWeapon = null; 
             switchWeapon('rifle');
         }
@@ -486,6 +663,7 @@
             const metalMat = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.8, roughness: 0.2 });
             const woodMat = new THREE.MeshStandardMaterial({ color: 0x654321, roughness: 0.9 });
             const skinMat = new THREE.MeshStandardMaterial({ color: 0xffdbac, roughness: 0.6 }); 
+            const glassMat = new THREE.MeshStandardMaterial({ color: 0x88ccff, metalness: 0.9, roughness: 0.1, transparent: true, opacity: 0.4 });
 
             // Body
             const body = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.4), metalMat);
@@ -510,6 +688,32 @@
             mag.rotation.x = 0.3;
             mag.name = "magazine"; 
             group.add(mag);
+
+            // --- SCOPE ---
+            const scopeGroup = new THREE.Group();
+            // Mounts
+            const mount1 = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, 0.02), metalMat);
+            mount1.position.set(0, 0.06, 0);
+            scopeGroup.add(mount1);
+            const mount2 = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, 0.02), metalMat);
+            mount2.position.set(0, 0.06, -0.15);
+            scopeGroup.add(mount2);
+            // Main Tube
+            const scopeTube = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.25, 12), metalMat);
+            scopeTube.rotation.x = Math.PI / 2;
+            scopeTube.position.set(0, 0.09, -0.08);
+            scopeGroup.add(scopeTube);
+            // Eyepiece
+            const eyePiece = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.025, 0.05, 12), metalMat);
+            eyePiece.rotation.x = Math.PI / 2;
+            eyePiece.position.set(0, 0.09, 0.06);
+            scopeGroup.add(eyePiece);
+            // Lens
+            const lens = new THREE.Mesh(new THREE.CircleGeometry(0.02, 12), glassMat);
+            lens.position.set(0, 0.09, 0.086);
+            scopeGroup.add(lens);
+
+            group.add(scopeGroup);
 
             // Hands
             const rHand = new THREE.Group();
@@ -551,44 +755,81 @@
             group.add(lHand);
             group.add(lArm);
 
-            // --- IMPROVED MUZZLE FLASH ---
+            // --- IMPROVED MUZZLE FLASH (High Quality) ---
             muzzleFlashMesh = new THREE.Group();
             muzzleFlashMesh.position.set(0, 0.02, -0.9);
             muzzleFlashMesh.visible = false;
             group.add(muzzleFlashMesh);
 
-            const flashMat = new THREE.MeshBasicMaterial({ 
-                color: 0xffaa00, 
+            // 1. Central Core (Bright White/Blueish Cylinder) - Represents hot gas
+            const coreGeo = new THREE.CylinderGeometry(0.01, 0.03, 0.4, 8);
+            coreGeo.rotateX(Math.PI / 2); // Point forward
+            coreGeo.translate(0, 0, -0.2); // Offset origin to base
+            const coreMat = new THREE.MeshBasicMaterial({ 
+                color: 0xffffff, 
+                blending: THREE.AdditiveBlending, 
+                transparent: true, 
+                opacity: 0.9, 
+                depthWrite: false 
+            });
+            const core = new THREE.Mesh(coreGeo, coreMat);
+            muzzleFlashMesh.add(core);
+
+            // 2. Inner Flame (Bright Yellow Cross)
+            const innerMat = new THREE.MeshBasicMaterial({ 
+                color: 0xffcc44, 
+                blending: THREE.AdditiveBlending, 
                 transparent: true, 
                 opacity: 0.8, 
                 side: THREE.DoubleSide, 
-                blending: THREE.AdditiveBlending,
-                depthWrite: false // Prevents transparency issues
+                depthWrite: false 
             });
-            
-            const coreMat = new THREE.MeshBasicMaterial({ 
-                color: 0xffffff, 
+            const innerGeo = new THREE.PlaneGeometry(0.5, 0.15);
+            const inner1 = new THREE.Mesh(innerGeo, innerMat);
+            const inner2 = new THREE.Mesh(innerGeo, innerMat);
+            inner2.rotation.z = Math.PI / 2;
+            muzzleFlashMesh.add(inner1);
+            muzzleFlashMesh.add(inner2);
+
+            // 3. Outer Spikes (Orange/Red Random Bursts)
+            const outerMat = new THREE.MeshBasicMaterial({ 
+                color: 0xff6600, 
+                blending: THREE.AdditiveBlending, 
                 transparent: true, 
-                opacity: 0.9, 
+                opacity: 0.5, 
                 side: THREE.DoubleSide, 
-                blending: THREE.AdditiveBlending,
-                depthWrite: false
+                depthWrite: false 
             });
-
-            // 1. Cross Planes (Outer Flame)
-            const plane1 = new THREE.Mesh(new THREE.PlaneGeometry(0.35, 0.12), flashMat);
-            muzzleFlashMesh.add(plane1);
             
-            const plane2 = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 0.35), flashMat);
-            muzzleFlashMesh.add(plane2);
+            // Add 3 random angled planes for variety
+            for(let i=0; i<3; i++) {
+                const w = 0.4 + Math.random() * 0.3;
+                const h = 0.05 + Math.random() * 0.1;
+                const spike = new THREE.Mesh(new THREE.PlaneGeometry(w, h), outerMat);
+                // Random rotation for each spike relative to the group
+                spike.rotation.z = Math.random() * Math.PI; 
+                muzzleFlashMesh.add(spike);
+            }
 
-            // 2. Central Core (Bright Hotspot)
-            const core = new THREE.Mesh(new THREE.CircleGeometry(0.06, 8), coreMat);
-            core.position.z = 0.01; // Slight offset to prevent z-fighting
-            muzzleFlashMesh.add(core);
+            // 4. IMPACT FRAME (The "Punch") - Hidden by default
+            // A large, bright, jagged shape that only appears for 1 frame
+            const impactGeo = new THREE.CircleGeometry(0.6, 5); // 5 segments = Star/Pentagon shape
+            const impactMat = new THREE.MeshBasicMaterial({ 
+                color: 0xffffff, // Pure White
+                transparent: true, 
+                opacity: 1.0, 
+                side: THREE.DoubleSide,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending // Maximum brightness
+            });
+            const impactMesh = new THREE.Mesh(impactGeo, impactMat);
+            impactMesh.name = "impactFrame";
+            impactMesh.visible = false; 
+            impactMesh.position.z = 0.05; // Sit slightly in front
+            muzzleFlashMesh.add(impactMesh);
 
             // Light
-            muzzleLight = new THREE.PointLight(0xffaa00, 0, 10);
+            muzzleLight = new THREE.PointLight(0xffaa00, 0, 15);
             muzzleLight.position.set(0, 0.05, -1.0);
             group.add(muzzleLight);
 
@@ -737,6 +978,9 @@
             isSpinning = false;
             inspectHoldTimer = 0;
             
+            // Cancel Scope on switch
+            isScoped = false;
+            
             activeWeapon = type;
             drawTimer = 0; 
 
@@ -784,7 +1028,18 @@
                 const hit = intersects[0];
                 if (hit.object.geometry.type !== 'PlaneGeometry' || hit.distance < 2.0) {
                      setTimeout(() => {
-                        createBulletHole(hit.point, hit.face.normal, true);
+                        // FIX: Transform local normal to world space for correct rotation
+                        const normal = hit.face.normal.clone();
+                        normal.transformDirection(hit.object.matrixWorld);
+                        
+                        // Get Hit Color
+                        let hitColor = 0x999999;
+                        if (hit.object.material && hit.object.material.color) {
+                            hitColor = hit.object.material.color.getHex();
+                        }
+                        
+                        // Pass true for isLocal (implied) and hitColor
+                        createBulletHole(hit.point, normal, true, true, hitColor);
                         playSound('stab_hit');
                      }, 150);
                 }
@@ -1078,7 +1333,10 @@
                 case 'KeyA': moveLeft = true; break;
                 case 'KeyS': moveBackward = true; break;
                 case 'KeyD': moveRight = true; break;
-                case 'KeyR': if(activeWeapon === 'rifle') reload(); break;
+                case 'KeyR': 
+                    // Prevent reload if scoped
+                    if(activeWeapon === 'rifle' && !isScoped) reload(); 
+                    break;
                 case 'KeyC': isCrouched = true; break; 
                 case 'Digit1': switchWeapon('rifle'); break;
                 case 'Digit3': switchWeapon('knife'); break;
@@ -1094,7 +1352,13 @@
                         isSpinning = false;
                         if (knifeGroup) knifeGroup.rotation.set(0, 0, 0);
                     } 
-                    else if(!isReloading && !isFiring) {
+                    else if(!isFiring) {
+                        // PREVENT INSPECT IF SCOPED
+                        if (isScoped) return;
+
+                        // FIX: Allow Inspect to cancel Reload
+                        if (isReloading) cancelReload();
+
                         isInspecting = true; 
                         inspectTimer = 0; 
                     }
@@ -1138,24 +1402,60 @@
             if (!isLocked) return;
             if (Math.abs(event.movementX) > 100 || Math.abs(event.movementY) > 100) return;
 
-            camYaw -= event.movementX * SENSITIVITY;
-            camPitch -= event.movementY * SENSITIVITY;
+            let sens = SENSITIVITY;
+            // Lower sensitivity when scoped
+            if (isScoped) sens *= 0.5;
+
+            camYaw -= event.movementX * sens;
+            camPitch -= event.movementY * sens;
             
             const limit = 1.51; 
             if (camPitch > limit) camPitch = limit;
             if (camPitch < -limit) camPitch = -limit;
             
-            const maxSway = 0.06;
-            const swayX = Math.max(-maxSway, Math.min(maxSway, -event.movementX * 0.0006));
-            const swayY = Math.max(-maxSway, Math.min(maxSway, -event.movementY * 0.0006));
+            // Positional Sway (Increased 1.65x)
+            const maxSway = 0.1; // Was 0.06
+            const swayX = Math.max(-maxSway, Math.min(maxSway, -event.movementX * 0.001)); // Was 0.0006
+            const swayY = Math.max(-maxSway, Math.min(maxSway, -event.movementY * 0.001)); // Was 0.0006
             swayPos.x = swayX;
             swayPos.y = swayY;
+
+            // NEW: Rotational Sway (Weapon Lag) (Increased 1.65x)
+            // Tilts the gun opposite to the look direction
+            const maxSwayRot = 0.25; // Was 0.15
+            const rotX = Math.max(-maxSwayRot, Math.min(maxSwayRot, -event.movementY * 0.0033)); // Was 0.002
+            const rotY = Math.max(-maxSwayRot, Math.min(maxSwayRot, -event.movementX * 0.0033)); // Was 0.002
+            swayRot.x = rotX;
+            swayRot.y = rotY;
+        }
+
+        function cancelReload() {
+            if (!isReloading) return;
+            isReloading = false;
+            
+            // Immediately reset magazine to default attached position so it doesn't float
+            const mag = rifleGroup.getObjectByName('magazine');
+            if (mag) {
+                mag.visible = true;
+                mag.position.set(0, -0.15, -0.1); 
+                mag.rotation.set(0.3, 0, 0);
+            }
         }
 
         function fireRifle() {
-            if (isReloading || isInspecting) return;
+            if (isInspecting) isInspecting = false;
             
-            // REMOVED AUTO RELOAD: Just stop firing if empty
+            // FIX: Allow shooting to cancel reload if we have ammo
+            if (isReloading) {
+                if (currentAmmo > 0) {
+                    cancelReload();
+                } else {
+                    // Cannot cancel reload by shooting if empty (click)
+                    return;
+                }
+            }
+            
+            // Just stop firing if empty (manual reload required)
             if (currentAmmo <= 0) { 
                 isFiring = false; 
                 return; 
@@ -1174,8 +1474,19 @@
             let kickUp = 0.11 + Math.random() * 0.06; 
             let kickSide = (Math.random() - 0.5) * 0.1;
             
-            // Increased standing recoil multiplier from 1.0 to 2.0
-            const recoilMod = isCrouched ? 0.3 : 2.0;
+            // Recoil Logic Modified (Stacked)
+            let recoilMod = 1.5; // Base: Standing Hipfire
+            
+            if (isCrouched) {
+                recoilMod *= 0.2; // Crouch drastically reduces recoil (1.5 -> 0.3)
+            } 
+            
+            if (isScoped) {
+                recoilMod *= 0.25; // Scope also drastically reduces recoil (1.5 -> 0.375)
+            }
+            
+            // If both are true: 1.5 * 0.2 * 0.25 = 0.075 (Extremely low recoil)
+
             kickUp *= recoilMod;
             kickSide *= recoilMod;
 
@@ -1186,19 +1497,38 @@
             rifleGroup.position.z += 0.25; 
             rifleGroup.rotation.x += 0.2;   
 
-            // Flash Logic
+            // Flash Logic - Improved Randomization
             muzzleFlashMesh.visible = true;
-            muzzleFlashMesh.rotation.z = Math.random() * Math.PI * 2; // Random rotation
+            // Rotate the entire flash group randomly on Z
+            muzzleFlashMesh.rotation.z = Math.random() * Math.PI * 2; 
             
-            const scale = 0.8 + Math.random() * 0.6; // Random size
-            muzzleFlashMesh.scale.set(scale, scale, 1);
+            // Scale Axes independently for non-uniform flash shapes
+            const sX = 0.9 + Math.random() * 0.6;
+            const sY = 0.9 + Math.random() * 0.6;
+            const sZ = 1.0 + Math.random() * 0.5; // Elongate depth
+            muzzleFlashMesh.scale.set(sX, sY, sZ);
             
-            muzzleLight.intensity = 5.0;
+            // --- IMPACT FRAME LOGIC ---
+            const impact = muzzleFlashMesh.getObjectByName("impactFrame");
+            if (impact) {
+                impact.visible = true;
+                // Randomize impact rotation and scale for chaos
+                impact.rotation.z = Math.random() * Math.PI * 2;
+                const impScale = 1.2 + Math.random() * 0.5;
+                impact.scale.set(impScale, impScale, 1);
+                
+                // Hide after ~1 frame (20ms) to create the "subliminal" impact effect
+                setTimeout(() => { 
+                    if(impact) impact.visible = false; 
+                }, 20);
+            }
+
+            muzzleLight.intensity = 8.0; // Stronger flash light
             
             // Eject Shell
             ejectShell();
 
-            setTimeout(() => { muzzleFlashMesh.visible = false; }, 40);
+            setTimeout(() => { muzzleFlashMesh.visible = false; }, 40); // 40ms duration
 
             const horizSpeed = new THREE.Vector2(velocity.x, velocity.z).length();
             let spreadFactor = 0.008; 
@@ -1208,6 +1538,9 @@
                 if (horizSpeed < 0.1) spreadFactor = 0.0005; 
                 else spreadFactor *= 0.4;
             }
+            // Scoped spread reduction
+            if (isScoped) spreadFactor *= 0.1;
+
             currentSpread = spreadFactor * 50.0; 
 
             const spreadX = (Math.random() - 0.5) * spreadFactor;
@@ -1220,7 +1553,18 @@
             if (intersects.length > 0) {
                 const hit = intersects[0];
                 if (hit.object !== muzzleFlashMesh && !playerHand.children.includes(hit.object)) {
-                    createBulletHole(hit.point, hit.face.normal);
+                    // FIX: Transform local normal to world space for correct rotation
+                    const normal = hit.face.normal.clone();
+                    normal.transformDirection(hit.object.matrixWorld);
+
+                    // Get Hit Color
+                    let hitColor = 0x999999; // Default grey
+                    if (hit.object.material && hit.object.material.color) {
+                        hitColor = hit.object.material.color.getHex();
+                    }
+
+                    // Pass true for isLocal (implied) and hitColor
+                    createBulletHole(hit.point, normal, false, true, hitColor);
                 }
             }
         }
@@ -1262,10 +1606,8 @@
         }
 
         function ejectShell() {
-            // Create Shell Geometry
-            const shellGeo = new THREE.CylinderGeometry(0.01, 0.01, 0.04, 6);
-            const shellMat = new THREE.MeshStandardMaterial({ color: 0xD4AF37, metalness: 0.8, roughness: 0.3 }); // Gold color
-            const shell = new THREE.Mesh(shellGeo, shellMat);
+            // OPTIMIZATION: Reuse Geometry and Material
+            const shell = new THREE.Mesh(sharedShellGeo, sharedShellMat);
             
             // Calculate Spawn Position (Approximation relative to camera/weapon)
             // Rifle is roughly at local (0.35, -0.4, -0.7) relative to camera
@@ -1284,6 +1626,9 @@
             shell.position.copy(spawnPos);
             shell.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
             
+            // OPTIMIZATION: Enable Frustum Culling (Default is true, but ensuring)
+            shell.frustumCulled = true;
+
             scene.add(shell);
 
             // Calculate Velocity
@@ -1304,20 +1649,113 @@
             });
         }
 
-        function createBulletHole(position, normal, isKnife = false) {
-            const size = isKnife ? 0.15 : 0.1;
-            const decal = new THREE.Mesh(
-                new THREE.PlaneGeometry(size, size),
-                new THREE.MeshBasicMaterial({ color: isKnife ? 0x333333 : 0x111111, side: THREE.DoubleSide })
-            );
-            decal.position.copy(position).add(normal.clone().multiplyScalar(0.01));
-            decal.lookAt(position.clone().add(normal));
-            if(isKnife) decal.rotation.z = Math.random() * Math.PI; 
-            scene.add(decal);
-            setTimeout(() => { scene.remove(decal); }, 10000);
+        function createBulletHole(position, normal, isKnife = false, isLocal = true, hitColor = 0x999999) {
+            // STRICT LOCAL VISIBILITY: 
+            // Only generate bullet holes/debris if it is the local player's action.
+            // This ensures you only see your own bullet holes.
+            if (!isLocal) return;
+
+            // 1. Manage Limit (Performance Safety Cap)
+            if (decals.length >= MAX_DECALS) {
+                const old = decals.shift();
+                if (old && old.mesh.parent) {
+                    scene.remove(old.mesh);
+                    // Clean up cloned materials to avoid memory leaks
+                    old.mesh.traverse(child => {
+                        if (child.material) child.material.dispose();
+                    });
+                }
+            }
+
+            // 2. Create Visual Group
+            const decalGroup = new THREE.Group();
+            decalGroup.position.copy(position).add(normal.clone().multiplyScalar(0.01)); // Offset to avoid z-fighting
+            
+            // FIX: Use setFromUnitVectors for robust orientation
+            decalGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+            
+            if (!isKnife) {
+                decalGroup.rotateZ(Math.random() * Math.PI * 2);
+            }
+
+            const size = isKnife ? 0.12 : 0.08;
+
+            // OPTIMIZATION: Reuse Geometry, Clone Material for fading
+            const thisHoleMat = sharedDecalHoleMat.clone();
+            const hole = new THREE.Mesh(sharedDecalGeo, thisHoleMat);
+            hole.scale.set(size / 2, size / 2, 1); // Scale unit circle
+            decalGroup.add(hole);
+
+            // Outer Crack/Burn (Lighter Grey) - Only for bullets
+            if (!isKnife) {
+                const thisOuterMat = sharedDecalOuterMat.clone();
+                const outer = new THREE.Mesh(sharedDecalGeo, thisOuterMat);
+                outer.position.z = -0.002; 
+                outer.rotation.z = Math.random();
+                // Previous scale logic: size * 0.8 * 1.4 -> unit scale
+                const outerScale = (size * 0.8) * 1.4;
+                outer.scale.set(outerScale, outerScale, 1);
+                decalGroup.add(outer);
+            }
+
+            // OPTIMIZATION: Manual Culling Check Helper
+            decalGroup.frustumCulled = false; // Groups don't cull, children do. 
+
+            scene.add(decalGroup);
+            
+            // Store with lifecycle data for fading
+            decals.push({
+                mesh: decalGroup,
+                life: 10.0, // 10 seconds total life
+                initialOuterOpacity: 0.5
+            });
+
+            // 3. Spawn Impact Debris
+            createImpactDebris(position, normal, isKnife, hitColor);
+        }
+
+        function createImpactDebris(pos, normal, isKnife, colorHex) {
+            // Increased count and size for better visibility
+            const count = isKnife ? 5 : 12; 
+            const size = isKnife ? 0.03 : 0.05; // Larger chunks
+            
+            // OPTIMIZATION: Material Caching
+            // Reuse material for this specific color if it exists
+            let mat = debrisMatCache[colorHex];
+            if (!mat) {
+                mat = new THREE.MeshBasicMaterial({ color: colorHex });
+                debrisMatCache[colorHex] = mat;
+            }
+            
+            // OPTIMIZATION: Reuse unit box geometry
+            for (let i = 0; i < count; i++) {
+                const mesh = new THREE.Mesh(sharedDebrisGeo, mat);
+                mesh.scale.set(size, size, size); // Scale the unit box
+                
+                // Start exactly at impact + normal offset
+                mesh.position.copy(pos).add(normal.clone().multiplyScalar(0.1));
+                
+                // Random velocity cone around normal
+                const spread = 1.0;
+                const velocity = normal.clone().add(new THREE.Vector3(
+                    (Math.random() - 0.5) * spread,
+                    (Math.random() - 0.5) * spread,
+                    (Math.random() - 0.5) * spread
+                )).normalize().multiplyScalar((isKnife ? 1.0 : 4.0) + Math.random() * 2.0);
+
+                scene.add(mesh);
+                debris.push({
+                    mesh: mesh,
+                    velocity: velocity,
+                    life: 0.5 + Math.random() * 0.8 // Random life betweeen 0.5s and 1.3s
+                });
+            }
         }
 
         function reload() {
+            // Unscope on reload
+            if (isScoped) isScoped = false;
+
             if (isReloading || currentAmmo === MAG_SIZE || reserveAmmo <= 0) return;
             
             // Check if we are starting from an empty/dropped mag state
@@ -1345,6 +1783,9 @@
             let playedRack = false;
             
             const animateReload = () => {
+                // FIX: Stop animation if reload was canceled
+                if (!isReloading) return;
+
                 const now = performance.now();
                 const progress = (now - startTime) / duration;
                 
@@ -1508,6 +1949,15 @@
         }
 
         function updateCrosshair(vel) {
+            // Hide standard crosshair if scoped
+            if (isScoped && activeWeapon === 'rifle') {
+                document.getElementById('crosshair').style.opacity = '0';
+                // Scope overlay is handled in animate(), scope-dot is hidden by CSS now
+                return;
+            } else {
+                document.getElementById('crosshair').style.opacity = '1';
+            }
+
             if (activeWeapon === 'knife' || activeWeapon === 'flash') {
                 const top = document.getElementById('ch-top');
                 const bot = document.getElementById('ch-bottom');
@@ -1536,9 +1986,16 @@
             right.style.left = `${4 + gap}px`;
         }
 
+        // --- NEW PHYSICS FUNCTIONS ---
+
         function applyFriction(delta) {
             const speed = new THREE.Vector2(velocity.x, velocity.z).length();
-            if (speed < 0.1) return;
+            // FIX: If speed is very low, force it to zero to prevent sliding/creeping
+            if (speed < 0.1) {
+                velocity.x = 0;
+                velocity.z = 0;
+                return;
+            }
             const control = (speed < STOP_SPEED) ? STOP_SPEED : speed;
             const drop = control * FRICTION * delta;
             let newSpeed = speed - drop;
@@ -1560,6 +2017,68 @@
             velocity.z += accelSpeed * wishDir.z;
         }
 
+        // Check if a point (player) is colliding with any wall
+        function checkWallCollision(newPos) {
+            // Player Collision Box (approximated as a point with radius for simple AABB check)
+            const radius = 0.3; 
+            const playerBox = new THREE.Box3();
+            playerBox.min.set(newPos.x - radius, newPos.y - 1.0, newPos.z - radius);
+            playerBox.max.set(newPos.x + radius, newPos.y + 0.2, newPos.z + radius);
+
+            for (let box of mapColliders) {
+                if (playerBox.intersectsBox(box)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // NEW: Multi-point Ground Check to prevent falling through edges
+        function checkGround() {
+            // Robust Ground Check: 9 rays covering player footprint
+            // Player radius is ~0.3, so we cast rays at radius 0.28 to catch edges
+            const r = 0.28;
+            const rays = [
+                new THREE.Vector3(0, 0, 0),       // Center
+                new THREE.Vector3(r, 0, 0),       // Right
+                new THREE.Vector3(-r, 0, 0),      // Left
+                new THREE.Vector3(0, 0, r),       // Back
+                new THREE.Vector3(0, 0, -r),      // Front
+                new THREE.Vector3(r, 0, r),       // Diagonals...
+                new THREE.Vector3(r, 0, -r),
+                new THREE.Vector3(-r, 0, r),
+                new THREE.Vector3(-r, 0, -r)
+            ];
+            
+            let bestHit = null;
+
+            for (let offset of rays) {
+                const origin = camera.position.clone().add(offset);
+                // Start ray HIGHER (1.0 units above eyes) to prevent tunneling through thin floors during fast falls
+                origin.y += 1.0; 
+                
+                groundRaycaster.set(origin, new THREE.Vector3(0, -1, 0));
+                
+                // Far enough to reach feet from eyes+offset 
+                // Eyes ~1.7. Offset +1.0. Total ~2.7 to feet. + buffer = 5.0
+                groundRaycaster.far = 5.0; 
+                
+                const hits = groundRaycaster.intersectObjects(mapGround);
+                
+                if (hits.length > 0) {
+                    const hit = hits[0];
+                    
+                    // We want the hit that provides the HIGHEST floor (smallest distance from overhead source)
+                    if (!bestHit || hit.distance < bestHit.distance) {
+                        bestHit = hit;
+                        // Attach corrected distance for physics logic (remove the 1.0 offset)
+                        bestHit.correctedDistance = hit.distance - 1.0;
+                    }
+                }
+            }
+            return bestHit;
+        }
+
         function animate() {
             requestAnimationFrame(animate);
 
@@ -1572,13 +2091,392 @@
                 return;
             }
 
-            // --- RENDER PASS (Clear -> World -> ClearDepth -> Weapon) ---
+            // --- SCOPE ANIMATION ---
+            // Interpolate Scope Factor
+            const targetScope = isScoped ? 1 : 0;
+            scopeFactor = THREE.MathUtils.lerp(scopeFactor, targetScope, delta * 15);
+            
+            // Lerp FOV
+            const targetFOV = THREE.MathUtils.lerp(BASE_FOV, SCOPED_FOV, scopeFactor);
+            camera.fov = targetFOV;
+            camera.updateProjectionMatrix();
+            
+            // Update Scope Overlay
+            const overlay = document.getElementById('scope-overlay');
+            if (scopeFactor > 0.1) {
+                overlay.style.display = 'block';
+                overlay.style.opacity = scopeFactor;
+            } else {
+                overlay.style.display = 'none';
+            }
+            
+            // Always keep player hand visible (requested by user)
+            playerHand.visible = true;
+
+            // --- RENDER PASS ---
             renderer.clear();
             renderer.render(scene, camera);
             renderer.clearDepth();
             renderer.render(weaponScene, weaponCamera);
 
+            // --- MOVEMENT PHYSICS UPDATE ---
+            
+            // 1. Calculate Input Velocity
+            const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0,1,0), camYaw);
+            const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0,1,0), camYaw);
+
+            let wishDir = new THREE.Vector3();
+            if (moveForward) wishDir.add(forward);
+            if (moveBackward) wishDir.sub(forward);
+            if (moveRight) wishDir.add(right);
+            if (moveLeft) wishDir.sub(right);
+            wishDir.normalize();
+
+            // 2. Handle Jump & Gravity
+            if (isGrounded) {
+                applyFriction(delta);
+                let speedLimit;
+                // ... (speed limit logic same as before) ...
+                if (activeWeapon === 'knife') {
+                    speedLimit = isCrouched ? CROUCH_SPEED_KNIFE : MAX_SPEED_KNIFE;
+                } else if (activeWeapon === 'flash') {
+                    speedLimit = isCrouched ? CROUCH_SPEED_KNIFE : MAX_SPEED_KNIFE; 
+                } else {
+                    if (isCrouched) {
+                        speedLimit = CROUCH_SPEED;
+                    } else if (isScoped) {
+                        speedLimit = CROUCH_SPEED * 1.1;
+                    } else {
+                        speedLimit = MAX_SPEED;
+                    }
+                }
+                
+                accelerate(wishDir, speedLimit, ACCEL, delta);
+                
+                if (keySpace) {
+                    velocity.y = JUMP_FORCE;
+                    isGrounded = false;
+                }
+            } else {
+                accelerate(wishDir, MAX_AIR_SPEED, AIR_ACCEL, delta);
+            }
+            
+            velocity.y -= GRAVITY * delta;
+
+            // 3. Apply Movement with Collision Checks
+            // We split X and Z to allow sliding against walls
+            
+            // X Axis
+            let nextPos = camera.position.clone();
+            nextPos.x += velocity.x * delta;
+            if (!checkWallCollision(nextPos)) {
+                camera.position.x = nextPos.x;
+            } else {
+                velocity.x = 0; // Stop momentum on hit
+            }
+
+            // Z Axis
+            nextPos = camera.position.clone();
+            nextPos.z += velocity.z * delta;
+            if (!checkWallCollision(nextPos)) {
+                camera.position.z = nextPos.z;
+            } else {
+                velocity.z = 0;
+            }
+
+            // Y Axis (Gravity + Floor Raycast)
+            camera.position.y += velocity.y * delta;
+
+            // Ground Check using Multi-Ray Strategy
+            const hit = checkGround();
+            
+            let targetHeight = isCrouched ? CROUCH_HEIGHT : STAND_HEIGHT;
+            currentEyeHeight = THREE.MathUtils.lerp(currentEyeHeight, targetHeight, delta * 15);
+
+            if (hit) {
+                // Use the corrected distance from the multi-ray check
+                const distToFeet = hit.correctedDistance; 
+                
+                // Landing/Snap threshold
+                // If velocity is down (falling) OR small (walking on slope)
+                if (velocity.y <= 0.1) {
+                    // Tolerance is EyeHeight + slight buffer
+                    if (distToFeet <= currentEyeHeight + 0.15) {
+                        // Snap to floor
+                        camera.position.y = hit.point.y + currentEyeHeight;
+                        velocity.y = 0;
+                        isGrounded = true;
+                        canJump = true;
+                    } else {
+                        isGrounded = false;
+                    }
+                } else {
+                    isGrounded = false;
+                }
+            } else {
+                // No ground detected
+                isGrounded = false;
+                
+                // Safety net: Reset if fell out of world
+                if (camera.position.y < -50) {
+                    camera.position.set(0, 5, 0);
+                    velocity.set(0,0,0);
+                }
+            }
+
+            // --- CAMERA RECOIL & VIEW ---
+            const decay = 8.0;
+            const factor = Math.exp(-decay * delta);
+            recoilPitch *= factor;
+            recoilYaw *= factor;
+            recoilScreenShake *= factor;
+
+            let finalPitch = camPitch + recoilPitch;
+            const absLimit = 1.51; 
+            if (finalPitch > absLimit) finalPitch = absLimit;
+            if (finalPitch < -absLimit) finalPitch = -absLimit;
+
+            const verticalFactor = 1.0 - Math.pow(Math.abs(finalPitch) / 1.57, 4);
+            camera.rotation.z = recoilScreenShake * verticalFactor;
+            camera.rotation.x = finalPitch;
+            camera.rotation.y = camYaw + recoilYaw;
+
+            // --- WEAPON ANIMATION UPDATES ---
+            if (drawTimer < 1.0) {
+                drawTimer += delta * 3.0; 
+                if (drawTimer > 1.0) drawTimer = 1.0;
+            }
+            const drawOffset = (1.0 - Math.pow(drawTimer, 0.5)) * -0.5;
+
+            // Smoothly dampen sway back to 0
+            swayPos.x = THREE.MathUtils.lerp(swayPos.x, 0, delta * 10);
+            swayPos.y = THREE.MathUtils.lerp(swayPos.y, 0, delta * 10);
+            
+            swayRot.x = THREE.MathUtils.lerp(swayRot.x, 0, delta * 10);
+            swayRot.y = THREE.MathUtils.lerp(swayRot.y, 0, delta * 10);
+
+            const speedMagnitude = new THREE.Vector2(velocity.x, velocity.z).length();
+            let bobX = 0, bobY = 0;
+            if (isGrounded && speedMagnitude > 0.1) {
+                bobTimer += delta * 15; 
+                bobX = Math.cos(bobTimer) * 0.005;
+                bobY = Math.sin(bobTimer * 2) * 0.005;
+            } else {
+                bobTimer = 0;
+            }
+
+            // --- WEAPON SPECIFIC LOGIC (Rifle/Knife/Flash) ---
+            if (activeWeapon === 'rifle') {
+                if (!isReloading) {
+                    // CALCULATE CURRENT BASE POSITION BASED ON SCOPE
+                    const currentBasePos = new THREE.Vector3().lerpVectors(weaponBasePos, scopedPos, scopeFactor);
+
+                    rifleGroup.position.set(
+                        currentBasePos.x + swayPos.x + bobX,
+                        currentBasePos.y + swayPos.y + bobY + drawOffset,
+                        currentBasePos.z
+                    );
+                    
+                    if (isInspecting) {
+                        inspectTimer += delta;
+                        
+                        // Apply sway on top of inspect animations
+                        
+                        // --- REVERTED TO PREVIOUS INSPECT ANIMATION ---
+                        if (inspectTimer < 0.5) {
+                            // Phase 1: Snappy entry
+                            const t = inspectTimer / 0.5;
+                            const ease = 1 - Math.pow(1 - t, 4); 
+                            
+                            rifleGroup.rotation.y = (ease * 1.3) + swayRot.y; 
+                            rifleGroup.rotation.z = (ease * 0.5); 
+                            rifleGroup.rotation.x = (ease * 0.25) + swayRot.x; 
+                            
+                            rifleGroup.position.x -= ease * 0.15;
+                            rifleGroup.position.y += ease * 0.08;
+                            rifleGroup.position.z += ease * 0.1;
+                        }
+                        else if (inspectTimer < 3.0) {
+                            // Phase 2: Slow drifting examination
+                            const t = (inspectTimer - 0.5) / 2.5; 
+                            
+                            const baseY = 1.3;
+                            const baseZ = 0.5;
+                            const baseX = 0.25;
+                            const basePosX = -0.15;
+                            const basePosY = 0.08;
+                            const basePosZ = 0.1;
+
+                            rifleGroup.rotation.y = baseY + (Math.sin(t * 2) * 0.1) + (t * 0.2) + swayRot.y; 
+                            rifleGroup.rotation.x = baseX + (Math.cos(t * 3) * 0.1) - (t * 0.1) + swayRot.x; 
+                            rifleGroup.rotation.z = baseZ - (t * 0.1); 
+                            
+                            rifleGroup.position.x += basePosX - (t * 0.02);
+                            rifleGroup.position.y += basePosY + (Math.sin(t * 4) * 0.01);
+                            rifleGroup.position.z += basePosZ;
+                        }
+                        else if (inspectTimer < 3.6) {
+                            // Phase 3: Return to hip
+                            const t = (inspectTimer - 3.0) / 0.6;
+                            const ease = t * t * (3 - 2 * t); 
+                            
+                            rifleGroup.rotation.y = THREE.MathUtils.lerp(1.6, 0, ease) + swayRot.y;
+                            rifleGroup.rotation.x = THREE.MathUtils.lerp(0.15, 0, ease) + swayRot.x;
+                            rifleGroup.rotation.z = THREE.MathUtils.lerp(0.25, 0, ease);
+                            
+                            rifleGroup.position.x += THREE.MathUtils.lerp(-0.17, 0, ease);
+                            rifleGroup.position.y += THREE.MathUtils.lerp(0.08, 0, ease);
+                            rifleGroup.position.z += THREE.MathUtils.lerp(0.1, 0, ease);
+                        }
+                        else {
+                            isInspecting = false;
+                        }
+                    } else {
+                        // Apply Rotational Sway to Idle/Hipfire
+                        // Lerp towards swayRot values (which decay to 0)
+                        rifleGroup.rotation.x = THREE.MathUtils.lerp(rifleGroup.rotation.x, swayRot.x, delta * 10);
+                        rifleGroup.rotation.y = THREE.MathUtils.lerp(rifleGroup.rotation.y, swayRot.y, delta * 10);
+                        // Tilt Z slightly on yaw sway for extra feel
+                        rifleGroup.rotation.z = THREE.MathUtils.lerp(rifleGroup.rotation.z, swayRot.y * 0.5, delta * 10);
+                    }
+                }
+                
+                if (muzzleLight.intensity > 0) muzzleLight.intensity -= delta * 30;
+                if (isFiring && time - lastFireTime > FIRE_RATE) {
+                    fireRifle();
+                    lastFireTime = time;
+                }
+                currentSpread = THREE.MathUtils.lerp(currentSpread, 0, delta * 5);
+            
+            } else if (activeWeapon === 'knife') {
+                
+                let targetPos = knifeBasePos.clone();
+                let targetRot = new THREE.Euler(0, 0, 0);
+
+                if (isAttackingKnife) {
+                    // ... (Attack logic unchanged) ...
+                    knifeAttackTimer += delta;
+                    const slashDuration = 0.35;
+                    const progress = knifeAttackTimer / slashDuration;
+                    if (progress < 0.2) {
+                         targetPos.x += 0.15; targetPos.y += 0.15; targetRot.z = -0.5; targetRot.y = -0.3;
+                    } else if (progress < 0.6) {
+                        targetPos.x -= 0.4; targetPos.y -= 0.1; targetPos.z -= 0.3; 
+                        targetRot.z = 1.2; targetRot.x = -0.4; targetRot.y = 0.8;
+                    }
+                    if (knifeAttackTimer > slashDuration) isAttackingKnife = false;
+                } 
+                else if (isInspecting) {
+                    // ... (Inspect logic unchanged, just target calculation) ...
+                    inspectTimer += delta;
+                    if (isInspectHeld) inspectHoldTimer += delta; else inspectHoldTimer = 0;
+                    if (isInspectHeld && inspectHoldTimer > 0.5) isSpinning = true;
+
+                    if (isSpinning) {
+                        const spinTime = inspectTimer - 0.5; 
+                        targetRot.z = -spinTime * 15.0; 
+                        targetRot.x = Math.sin(spinTime * 12) * 0.3;
+                        targetPos.y += Math.sin(spinTime * 12) * 0.02;
+                        if (!isInspectHeld) { isInspecting = false; isSpinning = false; }
+                    } 
+                    else {
+                        if (inspectTimer < 0.4) {
+                            const t = inspectTimer / 0.4;
+                            const ease = 1 - Math.pow(1 - t, 3);
+                            targetRot.z = -Math.PI * 2 * ease; 
+                            targetRot.x = Math.sin(t * Math.PI) * 0.5; 
+                            targetPos.y += Math.sin(t * Math.PI) * 0.05;
+                        } 
+                        else {
+                            const baseRotZ = -Math.PI * 2;
+                            const t = inspectTimer - 0.4;
+                            const blend = Math.min(t * 3.0, 1.0); 
+                            const lookZ = 0.8;
+                            const lookY = 0.5;
+                            targetRot.z = baseRotZ + THREE.MathUtils.lerp(0, lookZ, blend);
+                            targetRot.y = THREE.MathUtils.lerp(0, lookY, blend);
+                            if (blend >= 1.0) {
+                                const swayT = t - 0.3;
+                                targetRot.z += Math.sin(swayT) * 0.05;
+                                targetRot.y += Math.cos(swayT * 0.7) * 0.1;
+                                targetRot.x = 0.2 + Math.sin(swayT * 1.5) * 0.05;
+                            }
+                            targetPos.x = THREE.MathUtils.lerp(targetPos.x, 0.0, blend);
+                            targetPos.y = THREE.MathUtils.lerp(targetPos.y, -0.25, blend);
+                        }
+                    }
+                }
+
+                const smooth = delta * 15;
+                knifeGroup.position.set(
+                    THREE.MathUtils.lerp(knifeGroup.position.x, targetPos.x + swayPos.x + bobX, smooth),
+                    THREE.MathUtils.lerp(knifeGroup.position.y, targetPos.y + swayPos.y + bobY + drawOffset, smooth),
+                    THREE.MathUtils.lerp(knifeGroup.position.z, targetPos.z, smooth)
+                );
+                
+                // Add Sway to rotation
+                knifeGroup.rotation.x = THREE.MathUtils.lerp(knifeGroup.rotation.x, targetRot.x + swayRot.x, smooth);
+                knifeGroup.rotation.y = THREE.MathUtils.lerp(knifeGroup.rotation.y, targetRot.y + swayRot.y, smooth);
+                knifeGroup.rotation.z = THREE.MathUtils.lerp(knifeGroup.rotation.z, targetRot.z, smooth);
+
+            } else if (activeWeapon === 'flash') {
+                let targetPos = flashBasePos.clone();
+                let targetRot = new THREE.Euler(0, 0, 0);
+                
+                const grenadePart = flashGroup.children[0];
+                const handPart = flashGroup.children[1];
+
+                if (isThrowingFlash) {
+                    grenadePart.position.set(0, 0.03, 0);
+                    grenadePart.rotation.set(Math.PI / 2, 0, 0);
+                    handPart.position.set(0, -0.05, 0);
+                    handPart.rotation.set(0, 0, 0);
+
+                    flashThrowTimer += delta;
+                    if (flashThrowTimer < 0.2) {
+                        targetPos.x += 0.2; targetPos.y += 0.2; targetRot.z = -0.5;
+                    } else if (flashThrowTimer < 0.4) {
+                        targetPos.x -= 0.2; targetPos.y -= 0.2; targetPos.z -= 0.5; targetRot.x = 1.0; 
+                    } else {
+                        targetPos.y = -2.0; 
+                        if (flashThrowTimer > 1.0) isThrowingFlash = false;
+                    }
+                } 
+                else if (isInspecting) {
+                    inspectTimer += delta;
+                    const juggleSpeed = 0.6; 
+                    const t = (inspectTimer % juggleSpeed) / juggleSpeed; 
+                    const height = 0.2 * (4 * t * (1 - t)); 
+                    grenadePart.position.y = 0.03 + height;
+                    grenadePart.rotation.x = (Math.PI / 2) - (inspectTimer * Math.PI * 4); 
+                    const handOffset = Math.cos(t * Math.PI * 2) * 0.02;
+                    const handFlick = Math.sin(t * Math.PI * 2) * 0.1;
+                    handPart.position.y = -0.05 + handOffset; 
+                    handPart.rotation.x = -handFlick; 
+                } else {
+                    grenadePart.position.set(0, 0.03, 0);
+                    grenadePart.rotation.set(Math.PI / 2, 0, 0);
+                    handPart.position.set(0, -0.05, 0);
+                    handPart.rotation.set(0, 0, 0);
+                }
+
+                const smooth = delta * 15;
+                flashGroup.position.set(
+                    THREE.MathUtils.lerp(flashGroup.position.x, targetPos.x + swayPos.x + bobX, smooth),
+                    THREE.MathUtils.lerp(flashGroup.position.y, targetPos.y + swayPos.y + bobY + drawOffset, smooth),
+                    THREE.MathUtils.lerp(flashGroup.position.z, targetPos.z, smooth)
+                );
+                
+                // Add Sway to rotation
+                flashGroup.rotation.x = THREE.MathUtils.lerp(flashGroup.rotation.x, targetRot.x + swayRot.x, smooth);
+                flashGroup.rotation.y = THREE.MathUtils.lerp(flashGroup.rotation.y, targetRot.y + swayRot.y, smooth);
+                flashGroup.rotation.z = THREE.MathUtils.lerp(flashGroup.rotation.z, targetRot.z, smooth);
+            }
+
             // --- Shell Physics ---
+            const camPos = camera.position;
+            const CULL_DIST_SQ = 50 * 50; // Cull particles further than 50 units
+
             for (let i = shells.length - 1; i >= 0; i--) {
                 const s = shells[i];
                 s.life -= delta;
@@ -1604,7 +2502,8 @@
                     }
                 }
 
-                if (s.life <= 0) {
+                // CULLING & LIFE CHECK
+                if (s.life <= 0 || s.mesh.position.distanceToSquared(camPos) > CULL_DIST_SQ) {
                     scene.remove(s.mesh);
                     shells.splice(i, 1);
                 }
@@ -1631,9 +2530,58 @@
                     m.rotVel.multiplyScalar(0.8);
                 }
 
-                if (m.life <= 0) {
+                if (m.life <= 0 || m.mesh.position.distanceToSquared(camPos) > CULL_DIST_SQ) {
                     scene.remove(m.mesh);
+                    // Dispose dynamic geometry for mags if created per drop
+                    if(m.mesh.geometry) m.mesh.geometry.dispose(); 
                     droppedMags.splice(i, 1);
+                }
+            }
+            
+            // --- Bullet Hole Fading & Culling ---
+            for (let i = decals.length - 1; i >= 0; i--) {
+                const d = decals[i];
+                d.life -= delta;
+                
+                // Start fading in last 1 second
+                if (d.life < 1.0) {
+                    const fade = Math.max(0, d.life); // 1.0 -> 0.0
+                    
+                    d.mesh.children.forEach(child => {
+                        if (child.material) {
+                            // Scale opacity based on its original value/purpose
+                            if (child.material.opacity > fade) {
+                                child.material.opacity = fade; 
+                            }
+                        }
+                    });
+                }
+
+                if (d.life <= 0 || d.mesh.position.distanceToSquared(camPos) > CULL_DIST_SQ) {
+                    scene.remove(d.mesh);
+                    // Dispose cloned materials
+                    d.mesh.traverse(child => {
+                        if (child.material) child.material.dispose();
+                    });
+                    decals.splice(i, 1);
+                }
+            }
+
+            // --- Impact Debris Physics ---
+            for (let i = debris.length - 1; i >= 0; i--) {
+                const d = debris[i];
+                d.life -= delta;
+                
+                // Gravity
+                d.velocity.y -= GRAVITY * 0.8 * delta; // Slightly floatier than casings
+                d.mesh.position.add(d.velocity.clone().multiplyScalar(delta));
+                d.mesh.rotation.x += delta * 10;
+                d.mesh.rotation.y += delta * 5;
+
+                // Explicit Culling: Remove if too far
+                if (d.life <= 0 || d.mesh.position.distanceToSquared(camPos) > CULL_DIST_SQ) {
+                    scene.remove(d.mesh);
+                    debris.splice(i, 1);
                 }
             }
 
@@ -1645,6 +2593,7 @@
                 g.velocity.y -= GRAVITY * delta;
                 g.mesh.position.add(g.velocity.clone().multiplyScalar(delta));
                 
+                // Simple Floor Collision
                 if (g.mesh.position.y < 0.1) {
                     g.mesh.position.y = 0.1;
                     g.velocity.y *= -0.5;
@@ -1677,311 +2626,6 @@
                 flashIntensity -= delta * 0.25; 
                 if (flashIntensity < 0) flashIntensity = 0;
                 document.getElementById('flash-overlay').style.opacity = flashIntensity;
-            }
-
-            const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0,1,0), camYaw);
-            const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0,1,0), camYaw);
-
-            let wishDir = new THREE.Vector3();
-            if (moveForward) wishDir.add(forward);
-            if (moveBackward) wishDir.sub(forward);
-            if (moveRight) wishDir.add(right);
-            if (moveLeft) wishDir.sub(right);
-            wishDir.normalize();
-
-            let targetHeight = isCrouched ? CROUCH_HEIGHT : STAND_HEIGHT;
-            currentEyeHeight = THREE.MathUtils.lerp(currentEyeHeight, targetHeight, delta * 15);
-
-            if (keySpace && isGrounded) {
-                velocity.y = JUMP_FORCE;
-                isGrounded = false;
-            }
-
-            if (isGrounded) {
-                applyFriction(delta);
-                let speedLimit;
-                if (activeWeapon === 'knife') {
-                    speedLimit = isCrouched ? CROUCH_SPEED_KNIFE : MAX_SPEED_KNIFE;
-                } else if (activeWeapon === 'flash') {
-                    speedLimit = isCrouched ? CROUCH_SPEED_KNIFE : MAX_SPEED_KNIFE; 
-                } else {
-                    speedLimit = isCrouched ? CROUCH_SPEED : MAX_SPEED;
-                }
-                accelerate(wishDir, speedLimit, ACCEL, delta);
-            } else {
-                accelerate(wishDir, MAX_AIR_SPEED, AIR_ACCEL, delta);
-            }
-            
-            velocity.y -= GRAVITY * delta;
-            camera.position.add(velocity.clone().multiplyScalar(delta));
-
-            if (camera.position.y < currentEyeHeight) {
-                // Only land if we are falling or stationary, NOT if we are moving up (jumping)
-                if (velocity.y <= 0) {
-                    camera.position.y = currentEyeHeight;
-                    velocity.y = 0;
-                    isGrounded = true;
-                    canJump = true;
-                } else {
-                   // We are jumping up from the ground, don't clamp
-                   isGrounded = false;
-                }
-            } else {
-                isGrounded = false;
-            }
-            if (isGrounded) camera.position.y = currentEyeHeight;
-
-            const decay = 8.0;
-            const factor = Math.exp(-decay * delta);
-            recoilPitch *= factor;
-            recoilYaw *= factor;
-            recoilScreenShake *= factor;
-
-            let finalPitch = camPitch + recoilPitch;
-            const absLimit = 1.51; 
-            if (finalPitch > absLimit) finalPitch = absLimit;
-            if (finalPitch < -absLimit) finalPitch = -absLimit;
-
-            const verticalFactor = 1.0 - Math.pow(Math.abs(finalPitch) / 1.57, 4);
-            camera.rotation.z = recoilScreenShake * verticalFactor;
-            camera.rotation.x = finalPitch;
-            camera.rotation.y = camYaw + recoilYaw;
-
-            if (drawTimer < 1.0) {
-                drawTimer += delta * 3.0; 
-                if (drawTimer > 1.0) drawTimer = 1.0;
-            }
-            const drawOffset = (1.0 - Math.pow(drawTimer, 0.5)) * -0.5;
-
-            swayPos.x = THREE.MathUtils.lerp(swayPos.x, 0, delta * 10);
-            swayPos.y = THREE.MathUtils.lerp(swayPos.y, 0, delta * 10);
-
-            const speedMagnitude = new THREE.Vector2(velocity.x, velocity.z).length();
-            let bobX = 0, bobY = 0;
-            if (isGrounded && speedMagnitude > 0.1) {
-                bobTimer += delta * 15; 
-                bobX = Math.cos(bobTimer) * 0.005;
-                bobY = Math.sin(bobTimer * 2) * 0.005;
-            } else {
-                bobTimer = 0;
-            }
-
-            if (activeWeapon === 'rifle') {
-                if (!isReloading) {
-                    rifleGroup.position.set(
-                        weaponBasePos.x + swayPos.x + bobX,
-                        weaponBasePos.y + swayPos.y + bobY + drawOffset,
-                        weaponBasePos.z
-                    );
-                    
-                    if (isInspecting) {
-                        inspectTimer += delta;
-                        
-                        // --- INVESTIGATIVE INSPECT ANIMATION ---
-                        // Total Duration: ~3.5s
-                        // 1. Lift & Check Side (0s - 1.5s)
-                        // 2. Roll & Check Top (1.5s - 3.5s)
-                        // 3. Auto-return (handled by else block)
-
-                        if (inspectTimer < 1.5) {
-                            // Phase 1: Smooth lift to check the side/magwell
-                            const t = Math.min(inspectTimer / 1.2, 1);
-                            const ease = 1 - Math.pow(1 - t, 3); // Cubic Ease Out
-                            
-                            // Rotate Y to show side, Z to tilt mag up slightly
-                            rifleGroup.rotation.y = ease * 1.0; 
-                            rifleGroup.rotation.z = ease * 0.35;
-                            rifleGroup.rotation.x = ease * 0.15;
-                            
-                            // Bring closer and center
-                            rifleGroup.position.x = weaponBasePos.x - (ease * 0.12);
-                            rifleGroup.position.y = weaponBasePos.y + (ease * 0.08);
-                            rifleGroup.position.z = weaponBasePos.z + (ease * 0.05);
-                        } 
-                        else if (inspectTimer < 3.5) {
-                            // Phase 2: Slow smooth transition to looking at the top
-                            const t = (inspectTimer - 1.5) / 2.0; 
-                            const smooth = t * t * (3 - 2 * t); // Smoothstep curve
-                            
-                            // Rotate from Side View to Top/Angle View
-                            rifleGroup.rotation.y = THREE.MathUtils.lerp(1.0, 0.4, smooth);
-                            rifleGroup.rotation.z = THREE.MathUtils.lerp(0.35, -0.1, smooth);
-                            rifleGroup.rotation.x = THREE.MathUtils.lerp(0.15, 0.05, smooth);
-                            
-                            // Slight breathing bob to simulate focus
-                            const bob = Math.sin(t * Math.PI * 2) * 0.005;
-                            rifleGroup.position.y = weaponBasePos.y + 0.08 + bob;
-                            // Drift back right slightly
-                            rifleGroup.position.x = THREE.MathUtils.lerp(weaponBasePos.x - 0.12, weaponBasePos.x - 0.05, smooth);
-                        }
-                        else {
-                            isInspecting = false;
-                        }
-                    } else {
-                        // Smooth return to idle
-                        rifleGroup.rotation.x = THREE.MathUtils.lerp(rifleGroup.rotation.x, 0, delta * 8);
-                        rifleGroup.rotation.y = THREE.MathUtils.lerp(rifleGroup.rotation.y, 0, delta * 8);
-                        rifleGroup.rotation.z = THREE.MathUtils.lerp(rifleGroup.rotation.z, 0, delta * 8);
-                        
-                        // Positional return is handled by the main position.set logic at top of block
-                    }
-                }
-                
-                if (muzzleLight.intensity > 0) muzzleLight.intensity -= delta * 30;
-                if (isFiring && time - lastFireTime > FIRE_RATE) {
-                    fireRifle();
-                    lastFireTime = time;
-                }
-                currentSpread = THREE.MathUtils.lerp(currentSpread, 0, delta * 5);
-            
-            } else if (activeWeapon === 'knife') {
-                
-                let targetPos = knifeBasePos.clone();
-                let targetRot = new THREE.Euler(0, 0, 0);
-
-                if (isAttackingKnife) {
-                    knifeAttackTimer += delta;
-                    const slashDuration = 0.35;
-                    const progress = knifeAttackTimer / slashDuration;
-                    
-                    if (progress < 0.2) {
-                         targetPos.x += 0.15;
-                         targetPos.y += 0.15;
-                         targetRot.z = -0.5; 
-                         targetRot.y = -0.3;
-                    } else if (progress < 0.6) {
-                        targetPos.x -= 0.4; 
-                        targetPos.y -= 0.1;
-                        targetPos.z -= 0.3; 
-                        
-                        targetRot.z = 1.2; 
-                        targetRot.x = -0.4;
-                        targetRot.y = 0.8;
-                    }
-                    if (knifeAttackTimer > slashDuration) isAttackingKnife = false;
-                } 
-                else if (isInspecting) {
-                    inspectTimer += delta;
-                    if (isInspectHeld) inspectHoldTimer += delta; 
-                    else inspectHoldTimer = 0;
-
-                    if (isInspectHeld && inspectHoldTimer > 0.5) {
-                         isSpinning = true;
-                    }
-
-                    if (isSpinning) {
-                        const spinTime = inspectTimer - 0.5; 
-                        const spinSpeed = 15.0;
-                        
-                        targetRot.z = -spinTime * spinSpeed; 
-                        targetRot.x = Math.sin(spinTime * 12) * 0.3;
-                        targetPos.y += Math.sin(spinTime * 12) * 0.02;
-
-                        if (!isInspectHeld) {
-                             isInspecting = false;
-                             isSpinning = false;
-                        }
-                    } 
-                    else {
-                        if (inspectTimer < 0.4) {
-                            const t = inspectTimer / 0.4;
-                            const ease = 1 - Math.pow(1 - t, 3);
-                            targetRot.z = -Math.PI * 2 * ease; 
-                            targetRot.x = Math.sin(t * Math.PI) * 0.5; 
-                            targetPos.y += Math.sin(t * Math.PI) * 0.05;
-                        } 
-                        else {
-                            const baseRotZ = -Math.PI * 2;
-                            const t = inspectTimer - 0.4;
-                            
-                            const blend = Math.min(t * 3.0, 1.0); 
-                            const lookZ = 0.8;
-                            const lookY = 0.5;
-                            
-                            targetRot.z = baseRotZ + THREE.MathUtils.lerp(0, lookZ, blend);
-                            targetRot.y = THREE.MathUtils.lerp(0, lookY, blend);
-                            
-                            if (blend >= 1.0) {
-                                const swayT = t - 0.3;
-                                targetRot.z += Math.sin(swayT) * 0.05;
-                                targetRot.y += Math.cos(swayT * 0.7) * 0.1;
-                                targetRot.x = 0.2 + Math.sin(swayT * 1.5) * 0.05;
-                            }
-                            
-                            targetPos.x = THREE.MathUtils.lerp(targetPos.x, 0.0, blend);
-                            targetPos.y = THREE.MathUtils.lerp(targetPos.y, -0.25, blend);
-                            
-                            if (inspectTimer > 4.0 && !isInspectHeld) isInspecting = false;
-                        }
-                    }
-                }
-
-                const smooth = delta * 15;
-                knifeGroup.position.set(
-                    THREE.MathUtils.lerp(knifeGroup.position.x, targetPos.x + swayPos.x + bobX, smooth),
-                    THREE.MathUtils.lerp(knifeGroup.position.y, targetPos.y + swayPos.y + bobY + drawOffset, smooth),
-                    THREE.MathUtils.lerp(knifeGroup.position.z, targetPos.z, smooth)
-                );
-                
-                knifeGroup.rotation.x = THREE.MathUtils.lerp(knifeGroup.rotation.x, targetRot.x, smooth);
-                knifeGroup.rotation.y = THREE.MathUtils.lerp(knifeGroup.rotation.y, targetRot.y, smooth);
-                knifeGroup.rotation.z = THREE.MathUtils.lerp(knifeGroup.rotation.z, targetRot.z, smooth);
-
-            } else if (activeWeapon === 'flash') {
-                let targetPos = flashBasePos.clone();
-                let targetRot = new THREE.Euler(0, 0, 0);
-                
-                const grenadePart = flashGroup.children[0];
-                const handPart = flashGroup.children[1];
-
-                if (isThrowingFlash) {
-                    grenadePart.position.set(0, 0.03, 0);
-                    grenadePart.rotation.set(Math.PI / 2, 0, 0);
-                    handPart.position.set(0, -0.05, 0);
-                    handPart.rotation.set(0, 0, 0);
-
-                    flashThrowTimer += delta;
-                    if (flashThrowTimer < 0.2) {
-                        targetPos.x += 0.2;
-                        targetPos.y += 0.2;
-                        targetRot.z = -0.5;
-                    } else if (flashThrowTimer < 0.4) {
-                        targetPos.x -= 0.2;
-                        targetPos.y -= 0.2;
-                        targetPos.z -= 0.5;
-                        targetRot.x = 1.0; 
-                    } else {
-                        targetPos.y = -2.0; 
-                        if (flashThrowTimer > 1.0) isThrowingFlash = false;
-                    }
-                } 
-                else if (isInspecting) {
-                    inspectTimer += delta;
-                    const juggleSpeed = 0.6; 
-                    const t = (inspectTimer % juggleSpeed) / juggleSpeed; 
-                    const height = 0.2 * (4 * t * (1 - t)); 
-                    grenadePart.position.y = 0.03 + height;
-                    grenadePart.rotation.x = (Math.PI / 2) - (inspectTimer * Math.PI * 4); 
-                    const handOffset = Math.cos(t * Math.PI * 2) * 0.02;
-                    const handFlick = Math.sin(t * Math.PI * 2) * 0.1;
-                    handPart.position.y = -0.05 + handOffset; 
-                    handPart.rotation.x = -handFlick; 
-                } else {
-                    grenadePart.position.set(0, 0.03, 0);
-                    grenadePart.rotation.set(Math.PI / 2, 0, 0);
-                    handPart.position.set(0, -0.05, 0);
-                    handPart.rotation.set(0, 0, 0);
-                }
-
-                const smooth = delta * 15;
-                flashGroup.position.set(
-                    THREE.MathUtils.lerp(flashGroup.position.x, targetPos.x + swayPos.x + bobX, smooth),
-                    THREE.MathUtils.lerp(flashGroup.position.y, targetPos.y + swayPos.y + bobY + drawOffset, smooth),
-                    THREE.MathUtils.lerp(flashGroup.position.z, targetPos.z, smooth)
-                );
-                flashGroup.rotation.x = THREE.MathUtils.lerp(flashGroup.rotation.x, targetRot.x, smooth);
-                flashGroup.rotation.y = THREE.MathUtils.lerp(flashGroup.rotation.y, targetRot.y, smooth);
-                flashGroup.rotation.z = THREE.MathUtils.lerp(flashGroup.rotation.z, targetRot.z, smooth);
             }
 
             updateCrosshair(velocity);
